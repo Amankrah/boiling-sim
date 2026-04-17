@@ -1,0 +1,77 @@
+{
+  "water": {
+    "rho_ref": 997.0,
+    "c_p": 4186.0,
+    "k": 0.606,
+    "mu": 0.00089,
+    "sigma": 0.0589,
+    "beta": 0.000207,
+    "T_sat": 373.15,
+    "h_lv": 2.257e6,
+    "rho_vapor": 0.598,
+    "_units": {
+      "rho_ref": "kg/m3 at 25C",
+      "c_p": "J/(kg*K)",
+      "k": "W/(m*K)",
+      "mu": "Pa*s",
+      "sigma": "N/m at 100C",
+      "beta": "1/K near 25C (rises to 7.5e-4 near 100C)",
+      "T_sat": "K (100C)",
+      "h_lv": "J/kg",
+      "rho_vapor": "kg/m3 at 100C"
+    }
+  },
+  "steel_304": {
+    "rho": 8000.0,
+    "c_p": 500.0,
+    "k": 16.2,
+    "_units": {
+      "rho": "kg/m3",
+      "c_p": "J/(kg*K)",
+      "k": "W/(m*K)"
+    }
+  },
+  "cast_iron": {
+    "rho": 7200.0,
+    "c_p": 460.0,
+    "k": 55.0
+  },
+  "aluminum": {
+    "rho": 2700.0,
+    "c_p": 900.0,
+    "k": 237.0
+  },
+  "copper": {
+    "rho": 8960.0,
+    "c_p": 385.0,
+    "k": 401.0
+  },
+  "carrot": {
+    "rho": 1040.0,
+    "c_p": 3900.0,
+    "k": 0.605,
+    "D_beta_carotene": 2.0e-10,
+    "K_partition": 0.3,
+    "initial_C_mg_per_kg": 83.0,
+    "Ea_J_per_mol": 70000.0,
+    "k0_per_s": 2.63e6,
+    "_units": {
+      "rho": "kg/m3",
+      "c_p": "J/(kg*K)",
+      "k": "W/(m*K)",
+      "D_beta_carotene": "m2/s",
+      "K_partition": "dimensionless",
+      "initial_C_mg_per_kg": "mg/kg (= 8.3 mg per 100g)",
+      "Ea_J_per_mol": "J/mol (activation energy, range 66-79 kJ/mol)",
+      "k0_per_s": "1/s (pre-exponential factor)"
+    }
+  },
+  "constants": {
+    "R_gas": 8.314,
+    "g": 9.81,
+    "_units": {
+      "R_gas": "J/(mol*K)",
+      "g": "m/s2"
+    }
+  }
+}

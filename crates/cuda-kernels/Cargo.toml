@@ -1,0 +1,15 @@
+[package]
+name = "cuda-kernels"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+cudarc = { workspace = true }
+anyhow = { workspace = true }
+
+[build-dependencies]
+cc = { workspace = true }
+
+[dev-dependencies]
+rand = "0.8"

@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.benchmarks/
+htmlcov/
+.coverage
+
+# Rust
+target/
+
+# Node
+node_modules/
+web/dist/
+
+# CUDA
+*.o
+*.ptx
+*.cubin
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# AI assistants
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Simulation output (large binary files)
+*.h5
+*.hdf5
+*.usd
+*.usda
+*.usdc
+*.vtu
+*.vtk
+profiles/
+
+# Logs
+*.log
+
+# Secrets
+.env
+.env.*

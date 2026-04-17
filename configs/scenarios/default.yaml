@@ -1,0 +1,49 @@
+# Default scenario: 20cm stainless steel pot, 25mm carrot, 10-minute boil
+pot:
+  diameter_m: 0.20
+  height_m: 0.12
+  wall_thickness_m: 0.003
+  base_thickness_m: 0.005
+  material: steel_304
+
+water:
+  fill_fraction: 0.75
+  initial_temp_c: 20.0
+
+carrot:
+  diameter_m: 0.025
+  length_m: 0.05
+  position: [0.0, 0.0, 0.03]
+  initial_beta_carotene_mg_per_100g: 8.3
+
+heating:
+  base_heat_flux_w_per_m2: 30000.0  # ~1000 W on a 20 cm base
+  ambient_temp_c: 22.0
+
+grid:
+  # Development tier (1mm): fast iteration, ~5M cells, ~6 GB VRAM
+  # Production tier (0.5mm): validation runs, ~38M cells, ~35 GB VRAM
+  dx_m: 0.001  # start with development tier
+  carrot_mesh_resolution: 40  # ~40k tets for dev, 80 for ~200k production
+
+solver:
+  cfl_safety_factor: 0.4           # multiplier on CFL-limited dt
+  max_dt_s: 0.1                    # hard cap on dt regardless of CFL
+  pressure_tol: 1.0e-5             # Jacobi/CG convergence on Poisson solve
+  pressure_max_iter: 200
+  diffusion_tol: 1.0e-4             # Jacobi/CG convergence on implicit diffusion
+  diffusion_max_iter: 50
+  h_conv_outer_w_per_m2_k: 10.0    # Newton cooling coefficient on outer pot wall
+
+boiling:
+  enabled: false                   # Phase 3: set true to activate the bubble pool
+  dT_onb_k: 5.0                    # wall superheat threshold for nucleation onset
+  contact_angle_rad: 1.0           # water on steel ≈ 0.7–1.4 rad
+  max_bubbles: 100000              # 100k for dev (dx=2mm), 1M for production (dx=0.5mm)
+  initial_bubble_radius_m: 1.0e-5  # 10 µm typical cavity mouth
+  nucleation_probability_per_step: 0.1
+  C_sf_rohsenow: 0.013             # water on stainless steel
+  Pr_n_rohsenow: 1.0
+
+total_time_s: 600.0
+output_every_s: 0.1

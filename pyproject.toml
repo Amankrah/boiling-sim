@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "boilingsim"
+version = "0.1.0"
+description = "Multiphysics 3D boiling simulation with GPU-accelerated coupled thermal, fluid, and nutrient retention modeling"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "warp-lang[examples]",
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "h5py",
+    "pyvista",
+    "trimesh",
+    "pygmsh",
+    "meshio",
+    "usd-core",
+    "fastapi",
+    "uvicorn[standard]",
+    "websockets",
+    "zstandard",
+    "pyyaml",
+    "pydantic",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-benchmark",
+    "ruff",
+]
+
+[project.scripts]
+boiling-sim-scenario = "boilingsim.scenario:main"
+
+[tool.setuptools.packages.find]
+where = ["python"]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+pythonpath = ["python"]
