@@ -553,17 +553,21 @@ def conduct_one_step(
         device=device,
     )
 
-    h_inner = cfg.pot.height_m - cfg.pot.base_thickness_m
-    water_line_z = cfg.pot.base_thickness_m + cfg.water.fill_fraction * h_inner
-    q_evap = 0.1 * cfg.heating.base_heat_flux_w_per_m2  # placeholder until Phase 3
-    T_onset_k = 85.0 + 273.15  # K — evaporation ramp begins here
-    T_sat_k = 100.0 + 273.15   # K — full q_evap at boiling
-    wp.launch(
-        apply_evaporative_cooling,
-        dim=(nx, ny, nz),
-        inputs=[grid.T, grid.mat, props.rho_wp, props.cp_wp,
-                wp.vec3(*grid.origin), dx, dt,
-                q_evap, water_line_z, MAT_FLUID,
-                T_onset_k, T_sat_k],
-        device=device,
-    )
+    # Phase-2 placeholder evaporative cooling. In Phase 3 the bubble-based
+    # latent-heat sink (boiling.scatter_latent_heat) replaces this entirely,
+    # so skip when boiling is enabled.
+    if not cfg.boiling.enabled:
+        h_inner = cfg.pot.height_m - cfg.pot.base_thickness_m
+        water_line_z = cfg.pot.base_thickness_m + cfg.water.fill_fraction * h_inner
+        q_evap = 0.1 * cfg.heating.base_heat_flux_w_per_m2
+        T_onset_k = 85.0 + 273.15
+        T_sat_k = 100.0 + 273.15
+        wp.launch(
+            apply_evaporative_cooling,
+            dim=(nx, ny, nz),
+            inputs=[grid.T, grid.mat, props.rho_wp, props.cp_wp,
+                    wp.vec3(*grid.origin), dx, dt,
+                    q_evap, water_line_z, MAT_FLUID,
+                    T_onset_k, T_sat_k],
+            device=device,
+        )

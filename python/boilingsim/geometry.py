@@ -223,6 +223,10 @@ class Grid:
     uy: wp.array
     uz: wp.array
     bubbles: Any = None  # BubblePool | None — typed Any to avoid circular import
+    # Phase-3 Milestone D: baseline water α (without bubbles). Evolving
+    # ``water_alpha`` is reset from this each bubble step, then reduced by
+    # the scatter of bubble volume fractions. Populated by build_pot_geometry.
+    water_alpha_base: Any = None
 
     @property
     def shape(self) -> tuple[int, int, int]:
@@ -365,11 +369,14 @@ def build_pot_geometry(cfg: ScenarioConfig, device: str = "cuda:0") -> Grid:
         ux=ux, uy=uy, uz=uz,
     )
 
-    # Phase 3 optional: allocate bubble pool if boiling is enabled.
+    # Phase 3 optional: allocate bubble pool + α baseline if boiling is enabled.
     if cfg.boiling.enabled:
         # Local import to avoid circular dependency at module-load time.
         from .boiling import allocate_bubble_pool
         grid.bubbles = allocate_bubble_pool(cfg, grid, device=device)
+        # Snapshot the static water mask so bubble-occupancy VOF can reset α each step.
+        grid.water_alpha_base = wp.zeros((nx, ny, nz), dtype=float, device=device)
+        wp.copy(grid.water_alpha_base, grid.water_alpha)
 
     return grid
 
