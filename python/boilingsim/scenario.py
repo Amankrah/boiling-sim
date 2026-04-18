@@ -119,6 +119,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Enable Phase-3 bubble pool + nucleation detection during --steady-heat. "
              "Requires boiling.enabled=true in the YAML (or set here).",
     )
+    p.add_argument(
+        "--with-nutrient",
+        action="store_true",
+        help="Enable Phase-4 carrot beta-carotene physics (Arrhenius degradation, "
+             "in-carrot diffusion, Sherwood leaching, water-side scalar advection). "
+             "Equivalent to setting nutrient.enabled=true in the YAML.",
+    )
     return p.parse_args(argv)
 
 
@@ -133,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
     # CLI flag can force boiling on (overrides YAML)
     if args.with_bubbles and not cfg.boiling.enabled:
         cfg.boiling.enabled = True
+    if args.with_nutrient and not cfg.nutrient.enabled:
+        cfg.nutrient.enabled = True
     print(f"Loaded scenario from {args.config}")
     print(f"  pot:    {cfg.pot.material}  D={cfg.pot.diameter_m*100:.1f}cm  H={cfg.pot.height_m*100:.1f}cm")
     print(f"  water:  fill={cfg.water.fill_fraction:.0%}  T0={cfg.water.initial_temp_c}°C")

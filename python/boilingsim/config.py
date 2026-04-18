@@ -67,6 +67,32 @@ class SolverConfig(BaseModel):
     diffusion_tol: float = Field(1e-4, gt=0.0)
     diffusion_max_iter: int = Field(15, gt=0)
     h_conv_outer_w_per_m2_k: float = Field(10.0, ge=0.0, description="Newton cooling coefficient on outer pot wall")
+    h_evap_free_surface_w_per_m2_k: float = Field(
+        5.0e4, ge=0.0,
+        description="Open-pot free-surface enthalpy-bleed coefficient. Fires only when "
+                    "cfg.boiling.enabled and a fluid cell is adjacent to air above. "
+                    "A real boiling pot is latent-heat-pinned at T_sat by vapour exit; "
+                    "our sealed domain needs this bookkeeping term to reproduce that. "
+                    "Default 5e4 W/m^2/K pins the free-surface row to T_sat + ~0.1 K "
+                    "at the 30 kW/m^2 stove default. Deeper fluid still drifts via "
+                    "bulk-to-surface transport lag -- see ``f_bulk_evap_per_s`` for "
+                    "the matching volumetric closure.",
+    )
+    f_bulk_evap_per_s: float = Field(
+        1.0, ge=0.0,
+        description="Bulk-boiling closure for the sealed computational domain. Every "
+                    "fluid cell with T > T_sat sees its superheat decay at rate "
+                    "``f_bulk_evap_per_s`` [1/s] -- a lumped model for the bulk "
+                    "nucleation pathway that the wall-anchored bubble pool does not "
+                    "capture (real water above saturation inside the column flashes "
+                    "to steam throughout its volume, not just at the fluid-air "
+                    "interface). Per-cell update: dT_remove = f*(T-T_sat)*dt, clamped "
+                    "to (T-T_sat) so a cell cannot be driven subcooled. Fires only "
+                    "when cfg.boiling.enabled. Default 1.0 /s (~1 s e-folding) matches "
+                    "the order of magnitude of real pot thermal response; set 0 to "
+                    "disable and recover the surface-only sink. Values above ~5 /s "
+                    "start damping legitimate buoyancy plumes.",
+    )
     use_implicit_conduction: bool = Field(
         True,
         description="Backward-Euler Jacobi for thermal conduction. Unconditionally "
@@ -117,6 +143,83 @@ class BoilingConfig(BaseModel):
     )
 
 
+class NutrientConfig(BaseModel):
+    """Phase 4 beta-carotene reaction-diffusion-leaching parameters.
+
+    When ``enabled=False`` the simulation skips all nutrient physics. When
+    True, a voxelised concentration field ``C`` is allocated on carrot cells
+    (initial value ``C0_mg_per_kg``) and evolved by Arrhenius degradation
+    (Milestone A), molecular diffusion (Milestone B), and Sherwood-correlation
+    surface leaching into a water-side passive scalar ``C_water`` (Milestone C).
+
+    Defaults match dev-guide sec.4 / data/materials.json:49-67 for beta-carotene
+    in carrot:
+        E_a = 70 kJ/mol      — activation energy
+        k0  = 2.63e6 /s      — pre-exponential factor
+        D_eff = 2e-10 m^2/s  — effective diffusivity in carrot tissue
+        K_partition = 0.3    — carrot/water equilibrium ratio
+        C0  = 83 mg/kg       — initial beta-carotene loading
+    """
+
+    enabled: bool = Field(
+        False,
+        description="Master switch. Off in default.yaml so Phase-0/1/2/3 regression tests unaffected.",
+    )
+    E_a_kJ_per_mol: float = Field(
+        70.0, gt=0.0,
+        description="Arrhenius activation energy for beta-carotene thermal degradation.",
+    )
+    k0_per_s: float = Field(
+        2.63e6, gt=0.0,
+        description="Arrhenius pre-exponential factor.",
+    )
+    D_eff_m2_per_s: float = Field(
+        2.0e-10, gt=0.0,
+        description="Effective diffusivity of beta-carotene in carrot tissue.",
+    )
+    K_partition: float = Field(
+        1.0e-5, gt=0.0,
+        description="Equilibrium partition coefficient: C_water / C_carrot at equilibrium. "
+                    "For bare beta-carotene in pure water this is 1e-4 to 1e-6 depending on "
+                    "temperature and tissue state (Treszczanowicz et al. 1998 measured carotene "
+                    "distribution between organic solvent and water in this range). The prior "
+                    "default of 0.007 modelled a 'moderately lipophilic' carotenoid ester, not "
+                    "bare beta-carotene; at our pot's 107:1 water:carrot volume ratio that value "
+                    "allowed ~75 %% of the carrot to dissolve before equilibrium, which blew "
+                    "past the dev-guide [80, 90] %% retention band. 1e-5 puts equilibrium "
+                    "C_water at K*C0 ~ 8e-4 mg/kg so leaching self-throttles at <1 %% of C0 "
+                    "and retention is correctly dominated by Arrhenius degradation. For water-"
+                    "soluble vitamins (C, folate) override to 0.5-2.0; for a carrot-in-oil "
+                    "emulsion, raise toward 0.007 (oil phase carries the carotene).",
+    )
+    C_water_sat_mg_per_kg: float = Field(
+        6.0e-3, gt=0.0,
+        description="Absolute saturation concentration of the solute in water (mg per kg "
+                    "water). Hard cap on the water-side concentration that the leaching "
+                    "kernel will produce, regardless of partition coefficient or driving "
+                    "force. Default 6e-3 mg/kg matches beta-carotene aqueous solubility at "
+                    "~100 C (order ~6 ug/L; Craft & Soares 1992 report ~0.6 ug/L at 20 C, "
+                    "scaled up an order of magnitude for boiling). The prior default of 0.6 "
+                    "mg/kg was 100x too high -- that is the 20 C *micro*gram figure misread "
+                    "as milligrams. Set very high (e.g. 1e6) for water-soluble nutrients "
+                    "where solubility never limits.",
+    )
+    C0_mg_per_kg: float = Field(
+        83.0, ge=0.0,
+        description="Initial beta-carotene concentration in carrot cells (mg per kg carrot tissue).",
+    )
+    # --- Milestone C (Sherwood leaching) water-side transport properties ---
+    nu_water_m2_per_s: float = Field(
+        2.94e-7, gt=0.0,
+        description="Kinematic viscosity of water at ~100 C, for Reynolds number.",
+    )
+    D_water_molec_m2_per_s: float = Field(
+        1.0e-9, gt=0.0,
+        description="Molecular diffusivity of beta-carotene in water, for Schmidt number "
+                    "and the h_m = Sh * D / L conversion.",
+    )
+
+
 class ScenarioConfig(BaseModel):
     pot: PotConfig = Field(default_factory=PotConfig)
     water: WaterConfig = Field(default_factory=WaterConfig)
@@ -125,6 +228,7 @@ class ScenarioConfig(BaseModel):
     grid: GridConfig = Field(default_factory=GridConfig)
     solver: SolverConfig = Field(default_factory=SolverConfig)
     boiling: BoilingConfig = Field(default_factory=BoilingConfig)
+    nutrient: NutrientConfig = Field(default_factory=NutrientConfig)
     total_time_s: float = Field(600.0, gt=0.0)
     output_every_s: float = Field(0.1, gt=0.0)
 

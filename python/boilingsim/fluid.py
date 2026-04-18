@@ -507,6 +507,7 @@ class FluidWorkspace:
     uz_tmp: wp.array           # (nx, ny, nz+1)
     T_tmp: wp.array            # (nx, ny, nz) SL temperature advection output
     T_ext: wp.array            # (nx, ny, nz) T extended into non-fluid cells
+    u_max_scalar: wp.array     # (1,) GPU-side reduction target for compute_max_velocity
 
 
 def allocate_fluid_workspace(grid: Grid, device: str = "cuda:0") -> FluidWorkspace:
@@ -519,6 +520,7 @@ def allocate_fluid_workspace(grid: Grid, device: str = "cuda:0") -> FluidWorkspa
         uz_tmp=wp.zeros((nx, ny, nz + 1), dtype=float, device=device),
         T_tmp=wp.zeros((nx, ny, nz), dtype=float, device=device),
         T_ext=wp.zeros((nx, ny, nz), dtype=float, device=device),
+        u_max_scalar=wp.zeros(1, dtype=float, device=device),
     )
 
 
@@ -655,17 +657,52 @@ def apply_buoyancy_step(
     )
 
 
-def compute_max_velocity(grid: Grid) -> float:
-    """Diagnostic: max |u| across all MAC faces (host roundtrip)."""
+@wp.kernel
+def _zero_scalar(out: wp.array(dtype=float)):
+    out[0] = float(0.0)
+
+
+@wp.kernel
+def _atomic_max_abs(field: wp.array3d(dtype=float), out: wp.array(dtype=float)):
+    i, j, k = wp.tid()
+    wp.atomic_max(out, 0, wp.abs(field[i, j, k]))
+
+
+def compute_max_velocity(grid: Grid, ws: "FluidWorkspace | None" = None) -> float:
+    """Return max |u| across all MAC faces.
+
+    When ``ws`` is provided, does a GPU-side reduction into
+    ``ws.u_max_scalar`` (three tiny kernel launches + one 4-byte readback)
+    — this is what ``compute_dt`` hits every step. Without ``ws``, falls
+    back to the legacy three-full-field ``.numpy()`` roundtrip so external
+    callers (tests, ad-hoc diagnostics) don't have to thread a workspace
+    around.
+
+    The GPU path collapses the per-step cost from ~50 ms (3 × ~16 MB
+    PCIe transfer + host ``abs().max()``) to sub-millisecond, which
+    matters for production 600 s runs at 0.5 mm where ``compute_dt``
+    fires ~600 k times.
+    """
+    if ws is not None:
+        device = ws.u_max_scalar.device
+        wp.launch(_zero_scalar, dim=1, inputs=[ws.u_max_scalar], device=device)
+        wp.launch(_atomic_max_abs, dim=grid.ux.shape,
+                  inputs=[grid.ux, ws.u_max_scalar], device=device)
+        wp.launch(_atomic_max_abs, dim=grid.uy.shape,
+                  inputs=[grid.uy, ws.u_max_scalar], device=device)
+        wp.launch(_atomic_max_abs, dim=grid.uz.shape,
+                  inputs=[grid.uz, ws.u_max_scalar], device=device)
+        return float(ws.u_max_scalar.numpy()[0])
+
     ux = grid.ux.numpy()
     uy = grid.uy.numpy()
     uz = grid.uz.numpy()
     return float(max(abs(ux).max(), abs(uy).max(), abs(uz).max()))
 
 
-def compute_cfl_dt(grid: Grid, cfg: ScenarioConfig) -> float:
+def compute_cfl_dt(grid: Grid, cfg: ScenarioConfig, ws: "FluidWorkspace | None" = None) -> float:
     """CFL-limited Δt from current max velocity."""
-    u_max = compute_max_velocity(grid)
+    u_max = compute_max_velocity(grid, ws=ws)
     if u_max < 1e-8:
         return cfg.solver.max_dt_s
     return cfg.solver.cfl_safety_factor * grid.dx / u_max

@@ -422,6 +422,104 @@ def apply_evaporative_cooling(
     T[i, j, k] = T_cell - dt * q_evap * frac / (rho_arr[m] * cp_arr[m] * dx)
 
 
+@wp.kernel
+def apply_free_surface_evap_sink(
+    T: wp.array3d(dtype=float),
+    mat: wp.array3d(dtype=int),
+    rho_arr: wp.array(dtype=float),
+    cp_arr: wp.array(dtype=float),
+    dx: float,
+    dt: float,
+    T_sat_k: float,
+    h_evap: float,
+    mat_fluid: int,
+    mat_air: int,
+):
+    """Open-pot free-surface enthalpy bleed, active only when boiling is on.
+
+    A real boiling pot is latent-heat-pinned: steam leaves the open top and
+    carries enthalpy out, holding bulk water at T_sat regardless of stove
+    power. Our sealed computational domain has no vapour exit, so once the
+    wall-boiling kernel can't absorb all the incoming stove flux the bulk
+    water drifts above saturation (observed: 99 -> 105 C over 600 s in Phase 4
+    Milestone E). This kernel plugs that hole: at every fluid cell whose +z
+    neighbour is air (i.e. the free surface), if T > T_sat, remove enthalpy
+    at rate ``h_evap * (T - T_sat) * dx^2`` [W per top face].
+
+    ``h_evap`` is a tuning knob with units W/(m^2 K). Default 5e4 pins the
+    bulk water to T_sat + ~0.1 K at our dev-grid stove setting; higher
+    values tighten the pin further, at a negligible compute cost.
+
+    Caps: per-step dT_remove is bounded to (T - T_sat) so the kernel never
+    drives the cell below saturation in a single step.
+    """
+    i, j, k = wp.tid()
+    if mat[i, j, k] != mat_fluid:
+        return
+    # Fire only at free-surface cells (next cell up is air).
+    if k + 1 >= T.shape[2]:
+        return
+    if mat[i, j, k + 1] != mat_air:
+        return
+    dT = T[i, j, k] - T_sat_k
+    if dT <= 0.0:
+        return
+    m = mat[i, j, k]
+    # q_evap [W/m^2] = h_evap * dT; applied across top face area dx^2 into
+    # cell volume dx^3 gives dT_remove = q * dt / (rho * cp * dx).
+    dT_remove = h_evap * dT * dt / (rho_arr[m] * cp_arr[m] * dx)
+    dT_remove = wp.min(dT_remove, dT)
+    T[i, j, k] = T[i, j, k] - dT_remove
+
+
+@wp.kernel
+def apply_bulk_evap_sink(
+    T: wp.array3d(dtype=float),
+    mat: wp.array3d(dtype=int),
+    dt: float,
+    T_sat_k: float,
+    f_bulk: float,
+    mat_fluid: int,
+):
+    """Bulk-boiling closure: relax every superheated fluid cell toward T_sat.
+
+    Companion to :func:`apply_free_surface_evap_sink`. The surface kernel
+    captures vapour escape at the fluid-air interface (the 2-D pathway). This
+    kernel captures bulk nucleation (the 3-D pathway): in a real pot, water
+    above saturation inside the column flashes to steam throughout its
+    volume, not only at the top. Our Lagrangian bubble pool nucleates only
+    at wall cavities, so once the wall is hot enough to boil but the bulk
+    has drifted above T_sat, the bulk has no shedding mechanism except slow
+    thermal transport up to the surface -- producing the 2-3 K bulk
+    superheat observed in Phase 4 runs before this kernel existed.
+
+    Lumped model: dT/dt = -f * (T - T_sat) on any fluid cell with T > T_sat,
+    where ``f`` [1/s] is the bulk-nucleation relaxation frequency (typical
+    pot response ~1 /s; set 0 to disable). Exact-integration is not used
+    because ``dt`` is already advection-CFL-bounded at ~ms and f*dt ~ 1e-3,
+    so the explicit form is fine and gives a per-cell update that reads
+    cleaner in the diagnostic trace.
+
+    Clamp ``dT_remove = min(f*dT*dt, dT)`` prevents overshoot into a
+    subcooled state -- physically impossible in an active boiling field,
+    numerically important for large ``dt`` at steep ``f``.
+
+    Enthalpy bookkeeping: mass is implicitly leaving the control volume as
+    steam (same accounting as the surface sink). The bulk sink lumps bulk
+    nucleation + onward surface escape into a single Newton-style term;
+    there is no vapour-inventory tracking on this path.
+    """
+    i, j, k = wp.tid()
+    if mat[i, j, k] != mat_fluid:
+        return
+    dT = T[i, j, k] - T_sat_k
+    if dT <= 0.0:
+        return
+    dT_remove = f_bulk * dT * dt
+    dT_remove = wp.min(dT_remove, dT)
+    T[i, j, k] = T[i, j, k] - dT_remove
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -571,3 +669,33 @@ def conduct_one_step(
                     T_onset_k, T_sat_k],
             device=device,
         )
+    else:
+        # Phase-4-prime: open-pot free-surface enthalpy bleed. Without this
+        # the sealed domain lets bulk water drift above saturation once the
+        # wall-boiling kernel saturates -- a BC artefact that overshoots
+        # Arrhenius degradation rates in the carrot by ~2x. The bleed pins
+        # T_water near T_sat + 0.1 K at steady state.
+        T_sat_k = 100.0 + 273.15
+        h_evap = cfg.solver.h_evap_free_surface_w_per_m2_k
+        wp.launch(
+            apply_free_surface_evap_sink,
+            dim=(nx, ny, nz),
+            inputs=[grid.T, grid.mat, props.rho_wp, props.cp_wp,
+                    dx, dt, T_sat_k, h_evap,
+                    MAT_FLUID, MAT_AIR],
+            device=device,
+        )
+        # Bulk-boiling closure: surface sink alone leaves a 2-3 K bulk
+        # superheat because the column relies on convection to dump deep
+        # fluid enthalpy up to the free surface. The volumetric sink lumps
+        # the bulk-nucleation pathway -- superheated fluid anywhere in the
+        # column flashes to steam -- into a Newton-style relaxation that
+        # closes the gap. See apply_bulk_evap_sink docstring for physics.
+        f_bulk = cfg.solver.f_bulk_evap_per_s
+        if f_bulk > 0.0:
+            wp.launch(
+                apply_bulk_evap_sink,
+                dim=(nx, ny, nz),
+                inputs=[grid.T, grid.mat, dt, T_sat_k, f_bulk, MAT_FLUID],
+                device=device,
+            )

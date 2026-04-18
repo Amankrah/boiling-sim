@@ -44,5 +44,14 @@ boiling:
   C_sf_rohsenow: 0.013
   Pr_n_rohsenow: 1.0
 
+nutrient:
+  enabled: false
+  E_a_kJ_per_mol: 70.0
+  k0_per_s: 2.63e6
+  D_eff_m2_per_s: 2.0e-10
+  K_partition: 1.0e-5               # bare beta-carotene in pure water
+  C0_mg_per_kg: 83.0
+  C_water_sat_mg_per_kg: 6.0e-3     # aqueous solubility at ~100 C
+
 total_time_s: 600.0
 output_every_s: 0.1

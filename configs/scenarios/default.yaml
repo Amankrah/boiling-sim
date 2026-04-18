@@ -45,5 +45,14 @@ boiling:
   C_sf_rohsenow: 0.013             # water on stainless steel
   Pr_n_rohsenow: 1.0
 
+nutrient:
+  enabled: false                   # Phase 4: set true to activate carrot beta-carotene physics
+  E_a_kJ_per_mol: 70.0             # Arrhenius activation energy
+  k0_per_s: 2.63e6                 # pre-exponential factor
+  D_eff_m2_per_s: 2.0e-10          # effective diffusivity in carrot tissue
+  K_partition: 1.0e-5              # bare beta-carotene in pure water (Treszczanowicz 1998 range 1e-4..1e-6)
+  C0_mg_per_kg: 83.0               # initial beta-carotene loading (mg / kg carrot)
+  C_water_sat_mg_per_kg: 6.0e-3    # aqueous solubility of beta-carotene at ~100 C (~6 ug/L)
+
 total_time_s: 600.0
 output_every_s: 0.1

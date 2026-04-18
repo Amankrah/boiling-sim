@@ -227,6 +227,12 @@ class Grid:
     # ``water_alpha`` is reset from this each bubble step, then reduced by
     # the scatter of bubble volume fractions. Populated by build_pot_geometry.
     water_alpha_base: Any = None
+    # Phase-4 Milestone A: beta-carotene concentration (mg/kg) on carrot cells.
+    # Cell-centred scalar, allocated when ``cfg.nutrient.enabled``. ``C_water``
+    # (Phase-4 Milestone C) will hold the water-side passive scalar tracking
+    # leached mass; allocated lazily when leaching activates.
+    C: Any = None
+    C_water: Any = None
 
     @property
     def shape(self) -> tuple[int, int, int]:
@@ -377,6 +383,14 @@ def build_pot_geometry(cfg: ScenarioConfig, device: str = "cuda:0") -> Grid:
         # Snapshot the static water mask so bubble-occupancy VOF can reset α each step.
         grid.water_alpha_base = wp.zeros((nx, ny, nz), dtype=float, device=device)
         wp.copy(grid.water_alpha_base, grid.water_alpha)
+
+    # Phase 4 optional: allocate nutrient concentration field on carrot cells
+    # and the water-side passive scalar that tracks leached mass (Milestone C).
+    if cfg.nutrient.enabled:
+        from .nutrient import initialize_nutrient_field
+        grid.C = wp.zeros((nx, ny, nz), dtype=float, device=device)
+        grid.C_water = wp.zeros((nx, ny, nz), dtype=float, device=device)
+        initialize_nutrient_field(grid, cfg, device=device)
 
     return grid
 

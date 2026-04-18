@@ -25,7 +25,7 @@ from .fluid import (
     enforce_no_slip,
     pressure_projection,
 )
-from .geometry import MAT_FLUID, MAT_POT_WALL, Grid, build_pot_geometry
+from .geometry import MAT_CARROT, MAT_FLUID, MAT_POT_WALL, Grid, build_pot_geometry
 from .thermal import (
     MaterialProps,
     ThermalWorkspace,
@@ -57,6 +57,21 @@ class ScalarSample:
     mean_departed_bubble_R_mm: float = 0.0  # mean R of detached (site_cleared == 1) active bubbles
     max_bubble_R_mm: float = 0.0
     alpha_min: float = 1.0                   # min water_alpha anywhere (0 = bubble-saturated)
+    # Phase-4 Milestone A diagnostic (100 = no degradation, 0 = complete loss)
+    retention_pct: float = 100.0
+    # Phase-4 instrumentation: mass-partition diagnostic. The four channels
+    # sum to 100 %% when physics is correct. degraded_pct is *signed*: a
+    # sudden negative value indicates mass creation (numerical artefact),
+    # a sudden positive spike after a stable trajectory indicates mass
+    # destruction. Do NOT clamp to [0, 100] -- that hides bugs, which
+    # happened in the earlier non-conservative SL advection run.
+    leached_pct: float = 0.0
+    degraded_pct: float = 0.0
+    # Cumulative mass clipped out of C_water by the post-advection
+    # saturation clamp (physical solubility cap). Normally near zero; grows
+    # when pressure-projection residual ∇·u concentrates mass at stagnation
+    # cells past C_water_sat. See clamp_c_water_and_track_precipitation.
+    precipitated_pct: float = 0.0
 
 
 class Simulation:
@@ -70,6 +85,11 @@ class Simulation:
         self.props = MaterialProps.from_scenario(cfg, device=device)
         self.ws_fluid: FluidWorkspace = allocate_fluid_workspace(self.grid, device=device)
         self.ws_thermal: ThermalWorkspace = allocate_thermal_workspace(self.grid, device=device)
+        # Phase-4 Milestone B: ping-pong buffer for explicit in-carrot diffusion.
+        self.ws_nutrient = None
+        if cfg.nutrient.enabled and self.grid.C is not None:
+            from .nutrient import allocate_nutrient_workspace
+            self.ws_nutrient = allocate_nutrient_workspace(self.grid, device=device)
 
         # Water-specific constants (Phase 2 uses constant properties).
         self.rho_water = float(self.props.rho[MAT_FLUID])
@@ -80,6 +100,8 @@ class Simulation:
         self._mat_host = self.grid.mat.numpy()
         self._water_mask = self._mat_host == MAT_FLUID
         self._wall_mask = self._mat_host == MAT_POT_WALL
+        self._carrot_mask = self._mat_host == MAT_CARROT
+        self._n_carrot = int(self._carrot_mask.sum())
         # Inner-wall (fluid-contact-face) mask: pot-wall cells whose +z neighbor
         # is fluid. This is the Rohsenow-relevant boiling surface. For low-k
         # pot materials the heater face is several K hotter than this face due
@@ -102,9 +124,14 @@ class Simulation:
 
         With ``use_implicit_conduction=True`` (default) the thermal-diffusion
         limit is dropped — BE is unconditionally stable — so Δt is bounded
-        by advection CFL and the user-set ``max_dt_s``.
+        by advection CFL and the user-set ``max_dt_s``. When nutrient physics
+        is enabled the explicit in-carrot diffusion adds ``dx^2/(6*D_eff)``
+        as an additional upper bound; at the dev-grid defaults this is
+        ~6700 s and never binds, but a very fine dx can reach it, at which
+        point we clamp here instead of letting ``step_diffuse_nutrient``
+        raise.
         """
-        u_max = compute_max_velocity(self.grid)
+        u_max = compute_max_velocity(self.grid, ws=self.ws_fluid)
         dt_cfl = self.grid.dx / max(u_max, 1.0e-8)
         dt_cap = self.cfg.solver.max_dt_s / self.cfg.solver.cfl_safety_factor
         if self.cfg.solver.use_implicit_conduction:
@@ -112,6 +139,9 @@ class Simulation:
         else:
             dt_thermal = compute_max_dt_conduction(self.props, self.grid.dx, safety=1.0)
             dt = min(dt_thermal, dt_cfl, dt_cap)
+        if self.cfg.nutrient.enabled:
+            from .nutrient import diffusion_stability_dt
+            dt = min(dt, diffusion_stability_dt(self.cfg, self.grid.dx))
         return self.cfg.solver.cfl_safety_factor * dt
 
     def step(self, dt: float | None = None) -> float:
@@ -152,6 +182,25 @@ class Simulation:
                 device=self.device,
             )
 
+        # 4c. Phase-4 Milestones A+B+C: Arrhenius degradation + in-carrot
+        #     diffusion + Sherwood-flux surface leaching into the water-side
+        #     passive scalar C_water. Order: degrade (reaction), then diffuse
+        #     (internal transport with zero-flux BC), then leach (opens the
+        #     surface, flux is driven by C_carrot - C_water/K_partition, scales
+        #     with h_m = Sh*D_water/D_carrot at the current face velocity).
+        if self.cfg.nutrient.enabled and self.grid.C is not None:
+            assert self.ws_nutrient is not None, (
+                "nutrient.enabled with grid.C allocated but ws_nutrient is None: "
+                "diffusion would be silently skipped. Check Simulation.__init__."
+            )
+            from .nutrient import step_degrade, step_diffuse_nutrient, step_leach
+            step_degrade(self.grid, self.cfg, dt, device=self.device)
+            step_diffuse_nutrient(
+                self.grid, self.ws_nutrient, self.cfg, dt,
+                device=self.device,
+            )
+            step_leach(self.grid, self.cfg, dt, device=self.device)
+
         # 5. No-slip on solid faces before projection.
         enforce_no_slip(self.grid, device=self.device)
 
@@ -164,6 +213,24 @@ class Simulation:
         # 7. Re-enforce no-slip (pressure subtraction doesn't touch solid faces,
         #    but this guards against drift from numerical error).
         enforce_no_slip(self.grid, device=self.device)
+
+        # 8. Phase-4 Milestone D: advect the water-side beta-carotene passive
+        #    scalar using the freshly projected (divergence-free) velocity
+        #    field, then clamp to the physical solubility cap. The clamp is
+        #    necessary because our pressure_projection runs to tol=1e-5, not
+        #    machine precision, so there is a small residual ∇·u that breaks
+        #    the upwind scheme's monotone property. Over ~90k steps this
+        #    accumulates at stagnation cells and produces 10-300x cap
+        #    excursions (bulk fluid mean stays correct, but peak pixels
+        #    violate physical solubility). Excess mass is credited to
+        #    precipitated_pct so the mass-balance triple still closes at
+        #    100 %%.
+        if (self.cfg.nutrient.enabled
+                and self.grid.C_water is not None
+                and self.ws_nutrient is not None):
+            from .nutrient import step_advect_c_water, step_clamp_c_water_sat
+            step_advect_c_water(self.grid, self.ws_nutrient, dt, device=self.device)
+            step_clamp_c_water_sat(self.grid, self.ws_nutrient, self.cfg, device=self.device)
 
         self.t += dt
         self.step_count += 1
@@ -185,7 +252,7 @@ class Simulation:
         else:
             T_inner_mean_c = float(T_wall.max() - 273.15)
             T_inner_max_c = float(T_wall.max() - 273.15)
-        u_max = compute_max_velocity(self.grid)
+        u_max = compute_max_velocity(self.grid, ws=self.ws_fluid)
 
         # Phase-3 bubble diagnostics — cheap host roundtrip over the bubble pool.
         n_active = 0
@@ -203,9 +270,44 @@ class Simulation:
                 max_R_mm = float(R.max() * 1000.0)
                 detached_mask = bubbles["site_cleared"][active_mask] == 1
                 if detached_mask.any():
-                    mean_departed_R_mm = float(R[detached_mask].mean() * 1000.0)
+                    # Use the frozen departure_radius so this reports the
+                    # Fritz-departure population mean, not post-departure growth.
+                    R_dep = bubbles["departure_radius"][active_mask][detached_mask]
+                    mean_departed_R_mm = float(R_dep.mean() * 1000.0)
             if self.grid.water_alpha_base is not None:
                 alpha_min = float(self.grid.water_alpha.numpy()[self._water_mask].min())
+
+        # Phase-4 Milestone A: retention fraction from carrot concentration field.
+        # Plus mass-conservation breakdown: still-in-carrot vs leached vs
+        # degraded vs precipitated. Inlined here (rather than calling the
+        # public retention_fraction / water_pool_fraction / precipitated_
+        # fraction helpers) so we reuse the cached self._carrot_mask and
+        # self._n_carrot instead of doing three extra grid.mat.numpy()
+        # roundtrips per sample.
+        retention_pct = 100.0
+        leached_pct = 0.0
+        degraded_pct = 0.0
+        precipitated_pct = 0.0
+        if self.grid.C is not None and self._n_carrot > 0:
+            C0 = self.cfg.nutrient.C0_mg_per_kg
+            ref_mass = C0 * float(self._n_carrot)
+            C_np = self.grid.C.numpy()
+            retention_pct = 100.0 * float(C_np[self._carrot_mask].sum()) / ref_mass
+            if self.grid.C_water is not None:
+                Cw_np = self.grid.C_water.numpy()
+                leached_pct = 100.0 * float(Cw_np.sum()) / ref_mass
+            if self.ws_nutrient is not None:
+                precipitated_pct = (
+                    100.0
+                    * float(self.ws_nutrient.precipitated_mass.numpy()[0])
+                    / ref_mass
+                )
+            # Signed residual -- do NOT clamp. Oscillation or a negative
+            # value means the advection scheme is creating/destroying mass
+            # (numerical artefact); we want that visible, not hidden.
+            degraded_pct = (
+                100.0 - retention_pct - leached_pct - precipitated_pct
+            )
 
         return ScalarSample(
             t=self.t,
@@ -222,6 +324,10 @@ class Simulation:
             mean_departed_bubble_R_mm=mean_departed_R_mm,
             max_bubble_R_mm=max_R_mm,
             alpha_min=alpha_min,
+            retention_pct=retention_pct,
+            leached_pct=leached_pct,
+            degraded_pct=degraded_pct,
+            precipitated_pct=precipitated_pct,
         )
 
     # ------------------------------------------------------------------
@@ -268,8 +374,16 @@ class Simulation:
                 snapshot_times.append(self.t)
                 if self.grid.bubbles is not None:
                     bs = self.grid.bubbles.bubbles.numpy()
-                    mask = bs["active"] == 1
-                    bubble_radii_snaps.append(bs["radius"][mask].astype(np.float32))
+                    # Departure-diameter histogram: restrict to bubbles that
+                    # have actually detached from a wall site and use the
+                    # frozen ``departure_radius`` rather than the live
+                    # ``radius`` (which keeps growing during rise). This
+                    # eliminates the near-zero spike caused by counting
+                    # in-flight infant bubbles as if they were departures.
+                    mask = (bs["active"] == 1) & (bs["site_cleared"] == 1)
+                    bubble_radii_snaps.append(
+                        bs["departure_radius"][mask].astype(np.float32)
+                    )
                     bubble_positions_snaps.append(bs["position"][mask].astype(np.float32))
                 last_snapshot_t = self.t
 
@@ -281,6 +395,11 @@ class Simulation:
                     extra = (f"  bubbles={s.n_active_bubbles:,}  "
                              f"R_mean={s.mean_bubble_R_mm:.2f}mm  "
                              f"alpha_min={s.alpha_min:.3f}")
+                if self.cfg.nutrient.enabled:
+                    extra += (f"  R={s.retention_pct:5.2f}%"
+                               f"  leach={s.leached_pct:.2f}%"
+                               f"  deg={s.degraded_pct:.2f}%"
+                               f"  precip={s.precipitated_pct:.2f}%")
                 print(
                     f"  t={self.t:7.2f}s  dt={dt*1000:5.2f}ms  "
                     f"T_water_mean={s.T_mean_water_c:6.2f}C  "
@@ -298,8 +417,8 @@ class Simulation:
         snapshot_times.append(self.t)
         if self.grid.bubbles is not None:
             bs = self.grid.bubbles.bubbles.numpy()
-            mask = bs["active"] == 1
-            bubble_radii_snaps.append(bs["radius"][mask].astype(np.float32))
+            mask = (bs["active"] == 1) & (bs["site_cleared"] == 1)
+            bubble_radii_snaps.append(bs["departure_radius"][mask].astype(np.float32))
             bubble_positions_snaps.append(bs["position"][mask].astype(np.float32))
 
         if out_path is not None:
@@ -323,6 +442,12 @@ class Simulation:
                 g.create_dataset("mean_departed_R_mm", data=np.array([s.mean_departed_bubble_R_mm for s in scalars]))
                 g.create_dataset("max_bubble_R_mm", data=np.array([s.max_bubble_R_mm for s in scalars]))
                 g.create_dataset("alpha_min", data=np.array([s.alpha_min for s in scalars]))
+                # Phase-4 Milestone A: retention_pct time series
+                g.create_dataset("retention_pct", data=np.array([s.retention_pct for s in scalars]))
+                # Phase-4 instrumentation: leaching vs degradation breakdown
+                g.create_dataset("leached_pct", data=np.array([s.leached_pct for s in scalars]))
+                g.create_dataset("degraded_pct", data=np.array([s.degraded_pct for s in scalars]))
+                g.create_dataset("precipitated_pct", data=np.array([s.precipitated_pct for s in scalars]))
                 # snapshots
                 sg = f.create_group("snapshots")
                 sg.create_dataset("t", data=np.array(snapshot_times))

@@ -40,13 +40,18 @@ class Bubble:
     """
     position: wp.vec3    # m, world-space position of bubble centre
     velocity: wp.vec3    # m/s, bubble-centre velocity
-    radius: float        # m
+    radius: float        # m, current (possibly still-growing) bubble radius
     birth_time: float    # s, simulation time at nucleation
     active: int          # 1 = live, 0 = empty slot
     site_i: int          # nucleation-site grid index (for site-active bookkeeping)
     site_j: int
     site_k: int
     site_cleared: int    # 1 after departure clears site_active; preserves site_i/j/k
+    departure_radius: float  # m, frozen copy of radius at the moment site_cleared flips 0 -> 1.
+                             # Diagnostics (departure-diameter histogram) must use this, not
+                             # ``radius`` -- a detached bubble keeps growing via Mikic-Rohsenow
+                             # as it rises, so `radius` alone is the age-weighted population,
+                             # not the Fritz-departure population.
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +259,7 @@ def _seed_test_bubble(
     b.site_j = -1
     b.site_k = -1
     b.site_cleared = 1
+    b.departure_radius = radius  # test bubbles are seeded post-departure
     bubbles[slot] = b
     slot_claim[slot] = 1
 
@@ -379,6 +385,8 @@ def detect_nucleation_sites(
     b.site_i = i
     b.site_j = j
     b.site_k = k
+    b.site_cleared = 0         # still attached; departure_radius will freeze on release
+    b.departure_radius = 0.0   # sentinel: non-zero only after the 0 -> 1 flip
     bubbles[slot] = b
     site_active[i, j, k] = 1
 
@@ -584,10 +592,14 @@ def update_bubbles(
     departed = (2.0 * bubble.radius >= D_d)
 
     # Clear the site-active flag on departure so a new bubble can spawn there.
+    # ``departure_radius`` is frozen at the 0 -> 1 transition so the
+    # departure-diameter histogram reports the size at detachment, not the
+    # post-departure grown size during rise.
     if departed:
         if bubble.site_cleared == 0 and bubble.site_i >= 0:
             site_active[bubble.site_i, bubble.site_j, bubble.site_k] = 0
             bubble.site_cleared = 1
+            bubble.departure_radius = bubble.radius
 
     # Advect: departed bubbles get local fluid velocity + upward slip.
     # Attached bubbles stay at the nucleation site.
