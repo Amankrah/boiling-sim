@@ -1,0 +1,86 @@
+# Vitamin C (L-ascorbic acid) validation scenario
+#
+# Purpose: exercise the leach / advection / partition / precipitation
+# subsystems that bare beta-carotene (K_partition = 1e-5) leaves as dead
+# code. Water-soluble solute gives an ~equal-order partition and a real
+# Sherwood driving force, so leached_pct should be non-negligible.
+#
+# Geometry and thermal BCs are identical to default.yaml; only the
+# nutrient block is solute-specific.
+pot:
+  diameter_m: 0.20
+  height_m: 0.12
+  wall_thickness_m: 0.003
+  base_thickness_m: 0.005
+  material: steel_304
+
+water:
+  fill_fraction: 0.75
+  initial_temp_c: 20.0
+
+carrot:
+  diameter_m: 0.025
+  length_m: 0.05
+  position: [0.0, 0.0, 0.03]
+  initial_beta_carotene_mg_per_100g: 8.3    # unused at Phase 4; retained for geometry validator
+
+heating:
+  base_heat_flux_w_per_m2: 30000.0
+  ambient_temp_c: 22.0
+
+grid:
+  dx_m: 0.001
+  carrot_mesh_resolution: 40
+
+solver:
+  cfl_safety_factor: 0.4
+  max_dt_s: 0.1
+  pressure_tol: 1.0e-5
+  pressure_max_iter: 200
+  diffusion_tol: 1.0e-4
+  diffusion_max_iter: 50
+  h_conv_outer_w_per_m2_k: 10.0
+
+boiling:
+  enabled: false                   # flipped on by scripts/run_retention.py
+  dT_onb_k: 5.0
+  contact_angle_rad: 1.0
+  max_bubbles: 100000
+  initial_bubble_radius_m: 1.0e-5
+  nucleation_probability_per_step: 0.1
+  C_sf_rohsenow: 0.013
+  Pr_n_rohsenow: 1.0
+
+# --- Vitamin C parameters (literature-anchored) ---
+# All citations in benchmarks/phase4_retention.md "Vitamin C extension".
+nutrient:
+  enabled: false                   # flipped on by scripts/run_retention.py
+  E_a_kJ_per_mol: 74.0             # Vieira, Teixeira, Silva (2000) J. Food Eng. 43:1-7
+                                   # cupuacu nectar aqueous, reversible first-order,
+                                   # forward E_a = 74 +/- 5 kJ/mol, k1(80 C) = 0.032 /min.
+                                   # Note: Vieira's model plateaus at C/C0 ~= 0.4 due to AA
+                                   # <-> DHAA reversibility in their matrix. We use simple
+                                   # first-order on plain boiling water where no equilibrium
+                                   # plateau is observed (Bongoni 2014: sealed-condition
+                                   # thermal loss is ~10x smaller than water-contact loss
+                                   # implying modest irreversible decay).
+  k0_per_s: 1.1e7                  # calibrated so k(100 C) = 4.82e-4 /s (~5e-4);
+                                   # k0 = 5e-4 * exp(E_a/(R*373.15)) = 5e-4 * exp(23.85).
+                                   # Vieira's k1(80C) extrapolated at E_a=74 would give
+                                   # k(100C) ~= 2e-3 /s -- 4x hotter -- but that is the
+                                   # acidic-sugared-nectar rate. Our rate targets
+                                   # ~74% thermal-only retention at 600 s, matching plain
+                                   # boiling-water blanching retention observed in carrot
+                                   # / pea / green-bean literature.
+  D_eff_m2_per_s: 5.0e-10          # carrot cortex 60-90 C range (3-8e-10), extrapolated
+                                   # to 100 C; sqrt(D*t) = 0.55 mm at 600 s => outer 0.55 mm
+                                   # shell is the only leachable zone in a 25 mm carrot.
+  K_partition: 1.0                 # water-soluble, symmetric partition; at 102:1 water:carrot
+                                   # volume ratio this drives ~99% transfer at equilibrium.
+  C0_mg_per_kg: 59.0               # USDA FoodData Central, raw carrot = 5.9 mg / 100 g
+  C_water_sat_mg_per_kg: 1.0e6     # effectively unlimited; aqueous solubility of ascorbic
+                                   # acid is 333 g/L ~= 3.3e5 mg/kg, far above reachable
+                                   # concentrations in the simulation.
+
+total_time_s: 600.0
+output_every_s: 0.1

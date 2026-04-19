@@ -45,6 +45,8 @@ def plot_retention_summary(
     tag: str,
     C0: float,
     target_band: tuple[float, float] = (80.0, 90.0),
+    solute_label: str = "beta-carotene",
+    exp_ref_pct: float | None = 84.0,
 ) -> dict:
     """Three-panel figure: (a) retention vs time with target band, (b) water
     and wall temperatures, (c) total carrot/water mass (mass-balance check).
@@ -77,7 +79,9 @@ def plot_retention_summary(
     #     whether retention loss is mostly Arrhenius or mostly leaching.
     axes[0].axhspan(target_band[0], target_band[1], color="tab:green", alpha=0.10,
                      label=f"target band [{target_band[0]:.0f}%,{target_band[1]:.0f}%]")
-    axes[0].axhline(84.0, ls=":", color="k", alpha=0.5, label="exp ref 84%")
+    if exp_ref_pct is not None:
+        axes[0].axhline(exp_ref_pct, ls=":", color="k", alpha=0.5,
+                         label=f"exp ref {exp_ref_pct:.0f}%")
     if have_breakdown:
         axes[0].fill_between(t, 0, R, color="tab:green", alpha=0.55,
                               label=f"in carrot ({R_final:.1f}%)")
@@ -89,7 +93,7 @@ def plot_retention_summary(
     axes[0].plot(t, R, "-", color="tab:purple", lw=1.5, label="R(t) measured")
     axes[0].set_xlabel("time [s]")
     axes[0].set_ylabel("mass fraction of initial [%]")
-    axes[0].set_title(f"{tag}: beta-carotene mass partition")
+    axes[0].set_title(f"{tag}: {solute_label} mass partition")
     axes[0].set_ylim(0, 102)
     axes[0].legend(loc="lower left", fontsize=8)
     axes[0].grid(alpha=0.3)
@@ -164,6 +168,21 @@ def main() -> int:
                     help="Output filename tag. Default: <material>_<D_carrot>mm.")
     ap.add_argument("--out-dir", type=pathlib.Path, default=ROOT / "benchmarks")
     ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--solute-label", type=str, default="beta-carotene",
+                    help="Solute name for plot title + summary text. Default "
+                         "'beta-carotene'; set e.g. 'vitamin C' for the "
+                         "water-soluble validation scenario.")
+    ap.add_argument("--target-band", type=float, nargs=2, metavar=("LO", "HI"),
+                    default=[80.0, 90.0],
+                    help="Retention target band (low, high) in %%. Default "
+                         "[80, 90] = dev-guide beta-carotene band. For vitamin "
+                         "C use --target-band 65 85 at 25 mm per the "
+                         "shell-thickness analysis in phase4_retention.md.")
+    ap.add_argument("--exp-ref-pct", type=float, default=84.0,
+                    help="Experimental reference retention %% shown as dotted "
+                         "line on the plot. Default 84 (beta-carotene Sultana "
+                         "reference). Set None-like 0 to hide, or e.g. 55 for "
+                         "the vitamin C Sonar 2019 12-min boil reference.")
     args = ap.parse_args()
 
     cfg = load_scenario(args.config)
@@ -230,15 +249,21 @@ def main() -> int:
 
     # --- Plots + validation summary ---
     plot_path = args.out_dir / f"phase4_retention_{tag}.png"
+    exp_ref = args.exp_ref_pct if args.exp_ref_pct > 0 else None
     stats = plot_retention_summary(
         out_h5, plot_path, tag,
         C0=cfg.nutrient.C0_mg_per_kg,
+        target_band=tuple(args.target_band),
+        solute_label=args.solute_label,
+        exp_ref_pct=exp_ref,
     )
 
     print("\n=== Retention summary ===")
+    print(f"  solute            = {args.solute_label}")
     print(f"  R({args.duration:.0f} s)         = {stats['R_final_pct']:.2f} %")
+    exp_ref_str = f" (exp ref {exp_ref:.0f} %)" if exp_ref is not None else ""
     print(f"  target band       = [{stats['target_band_lo']:.0f} %, "
-          f"{stats['target_band_hi']:.0f} %] (exp ref 84 %)")
+          f"{stats['target_band_hi']:.0f} %]{exp_ref_str}")
     status = "IN BAND" if stats["in_band"] else "OUT OF BAND"
     print(f"  => {status}")
     if stats["have_breakdown"]:
