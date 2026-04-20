@@ -8,13 +8,19 @@
 // (retention + leached + degraded + precipitated) for both solutes
 // + nutrient display names + a `set_nutrient` ControlMessage.
 //
-// v3 (this — Phase 6.6 data-forward upgrade): surfaces water
+// v3 (superseded — Phase 6.6 data-forward upgrade): surfaces water
 // temperature (mean/max/min) that Phase 4's pipeline already
 // computed but that was never on the wire. Adds run_id (uuid per
 // rebuild), total_time_s (target duration), is_complete (true once
 // the run finished and artefacts were written), last_error
 // (Pydantic validation failures from set_config messages).
-export const SCHEMA_VERSION = 3;
+//
+// v4 (this — realistic pot): echoes the running sim's pot geometry
+// (diameter, height, wall + base thickness) so the 3D <Pot> component
+// can scale to match whatever the user picked on the Configuration
+// page. Previously the pot was hardcoded at 20 cm × 12 cm regardless
+// of cfg.pot.
+export const SCHEMA_VERSION = 4;
 
 export interface GridMeta {
   nx: number;
@@ -65,6 +71,11 @@ export interface Snapshot {
   total_time_s: number;
   is_complete: boolean;
   last_error: string;
+  // --- v4: pot geometry echo (metres) ---
+  pot_diameter_m: number;
+  pot_height_m: number;
+  pot_wall_thickness_m: number;
+  pot_base_thickness_m: number;
 }
 
 /**

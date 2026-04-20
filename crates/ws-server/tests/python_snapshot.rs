@@ -86,4 +86,29 @@ fn python_msgpack_deserializes_and_matches_schema() {
         t_min >= -5.0 && t_max <= 200.0,
         "temperature out of Celsius band: [{t_min}, {t_max}]"
     );
+
+    // v4: pot geometry should echo the scenario YAML defaults
+    // (diameter 0.20 m, height 0.12 m, wall 0.003 m, base 0.005 m).
+    assert!(
+        snap.pot_diameter_m > 0.05 && snap.pot_diameter_m < 0.60,
+        "pot_diameter_m out of band: {}",
+        snap.pot_diameter_m
+    );
+    assert!(
+        snap.pot_height_m > 0.02 && snap.pot_height_m < 0.50,
+        "pot_height_m out of band: {}",
+        snap.pot_height_m
+    );
+    assert!(
+        snap.pot_wall_thickness_m > 0.0
+            && snap.pot_wall_thickness_m < snap.pot_diameter_m / 2.0,
+        "pot_wall_thickness_m out of band: {}",
+        snap.pot_wall_thickness_m
+    );
+    assert!(
+        snap.pot_base_thickness_m > 0.0
+            && snap.pot_base_thickness_m < snap.pot_height_m,
+        "pot_base_thickness_m out of band: {}",
+        snap.pot_base_thickness_m
+    );
 }

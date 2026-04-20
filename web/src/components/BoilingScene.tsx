@@ -28,6 +28,7 @@ import { Bubbles } from "./Bubbles";
 import { CarrotMesh } from "./CarrotMesh";
 import { GradientBackground } from "./GradientBackground";
 import { Pot } from "./Pot";
+import { Stove } from "./Stove";
 import { WaterVolume } from "./WaterVolume";
 
 export interface CameraPose {
@@ -46,10 +47,13 @@ interface Props {
 }
 
 const DEFAULT_CAMERA: CameraPose = {
-  // Slightly-more-cinematic ¾ view: farther back, lower, more
-  // off-axis than the old almost-top-down.
-  position: [0.30, -0.30, 0.22],
-  target: [0, 0, 0.05],
+  // Reframe for the freestanding electric range: cabinet center
+  // sits at world (0.14, 0.12), backsplash rises behind at y ~ 0.38,
+  // oven door drops to z ~ -0.35. Target the cooktop centre rather
+  // than the origin so the frame shows cabinet + pot + backsplash
+  // without pushing the oven door out of shot.
+  position: [0.75, -0.85, 0.55],
+  target: [0.14, 0.12, 0.05],
 };
 
 export function BoilingScene({
@@ -61,6 +65,7 @@ export function BoilingScene({
   return (
     <Canvas
       style={{ width: "100%", height: "100%" }}
+      shadows="soft"
       camera={{
         position: initialCamera.position,
         up: [0, 0, 1],
@@ -99,10 +104,24 @@ export function BoilingScene({
 
       {/* --- lighting: key + fill + rim --------------------- */}
       <ambientLight intensity={0.25} />
+      {/* Key light casts shadows -- shadow-camera bounds are tight
+          (+/- 0.6 m around origin) so the 1024^2 shadow map stays
+          crisp for the cabinet + pot area instead of being wasted
+          on the infinite grid. */}
       <directionalLight
-        position={[0.6, -0.8, 1.0]}
+        position={[0.9, -1.2, 1.4]}
         intensity={1.2}
         color={"#ffffff"}
+        castShadow
+        shadow-mapSize-width={1024}
+        shadow-mapSize-height={1024}
+        shadow-camera-left={-0.6}
+        shadow-camera-right={0.9}
+        shadow-camera-top={0.9}
+        shadow-camera-bottom={-0.6}
+        shadow-camera-near={0.1}
+        shadow-camera-far={3.5}
+        shadow-bias={-0.0005}
       />
       <directionalLight
         position={[-0.6, 0.6, 0.4]}
@@ -116,7 +135,20 @@ export function BoilingScene({
       />
 
       {/* --- scene content ---------------------------------- */}
-      <Pot />
+      {/* Stove first -- sits below z=0 so the pot's base rests on
+          its top plate. Emissive coil + indicator LED track
+          snapshot.wall_heat_flux so the heat source visibly
+          responds to the live heat-flux slider. */}
+      <Stove snapshot={snapshot} />
+      {/* Pot dimensions come from the v4 snapshot so the rendered
+          pot scales with whatever dims are actually being
+          simulated (edited via the Config page's Pot section). */}
+      <Pot
+        diameterM={snapshot.pot_diameter_m}
+        heightM={snapshot.pot_height_m}
+        wallThicknessM={snapshot.pot_wall_thickness_m}
+        baseThicknessM={snapshot.pot_base_thickness_m}
+      />
       <WaterVolume snapshot={snapshot} />
       <Bubbles snapshot={snapshot} />
       <CarrotMesh snapshot={snapshot} />
@@ -177,8 +209,8 @@ function SceneOrbitControls({
       target={initialTarget}
       enableDamping
       dampingFactor={0.1}
-      minDistance={0.05}
-      maxDistance={1.5}
+      minDistance={0.25}
+      maxDistance={2.5}
       makeDefault
     />
   );

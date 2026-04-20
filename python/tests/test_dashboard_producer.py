@@ -67,6 +67,9 @@ def test_snapshot_has_all_schema_fields(sim_dual):
         # v3 additions
         "water_temperature_mean", "water_temperature_max", "water_temperature_min",
         "run_id", "total_time_s", "is_complete", "last_error",
+        # v4 additions
+        "pot_diameter_m", "pot_height_m",
+        "pot_wall_thickness_m", "pot_base_thickness_m",
     }
     assert set(snap.keys()) == expected_fields, (
         f"missing/extra keys: "
@@ -123,6 +126,24 @@ def test_v3_run_metadata_defaults(sim_dual):
     assert snap["total_time_s"] == 0.0
     assert snap["is_complete"] is False
     assert snap["last_error"] == ""
+
+
+def test_v4_pot_geometry_echoes_cfg(sim_dual):
+    """v4 schema bump: pot dims must mirror cfg.pot so the 3D renderer
+    can scale to match whatever the user chose on the Config page."""
+    snap = build_snapshot(sim_dual, step=0)
+    cfg_pot = sim_dual.cfg.pot
+    for key, cfg_val in (
+        ("pot_diameter_m", cfg_pot.diameter_m),
+        ("pot_height_m", cfg_pot.height_m),
+        ("pot_wall_thickness_m", cfg_pot.wall_thickness_m),
+        ("pot_base_thickness_m", cfg_pot.base_thickness_m),
+    ):
+        assert key in snap, f"v4 field {key!r} missing from snapshot"
+        assert isinstance(snap[key], float)
+        assert snap[key] == pytest.approx(cfg_val), (
+            f"{key} on wire ({snap[key]}) != cfg.pot.{key.removeprefix('pot_')} ({cfg_val})"
+        )
 
 
 def test_v3_run_metadata_forwarded(sim_dual):

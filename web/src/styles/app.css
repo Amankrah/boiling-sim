@@ -1028,6 +1028,23 @@ select {
   z-index: 2;
 }
 
+/* Sidebar variant: card sits inside .app__controls alongside the
+   ControlPanel. Clear the absolute positioning + glass styling so
+   it reads as a regular rail card, not a floating overlay. */
+.scene-overlay--sidebar {
+  position: static;
+  top: auto;
+  right: auto;
+  width: 100%;
+  min-width: 0;
+  background: var(--bg-1);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  box-shadow: var(--shadow-1);
+  pointer-events: auto;
+  margin-bottom: var(--space-3);
+}
+
 .scene-overlay__hero {
   font-size: var(--text-xl);
   font-weight: 600;

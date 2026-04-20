@@ -58,11 +58,13 @@ export function LivePage({
             Waiting for first snapshot from the Rust relay…
           </div>
         )}
-        {snapshot ? <SceneOverlay snapshot={snapshot} /> : null}
         {snapshot?.is_rebuilding ? <RebuildBanner /> : null}
       </section>
 
       <aside className="app__controls">
+        {snapshot ? (
+          <SceneOverlay snapshot={snapshot} variant="sidebar" />
+        ) : null}
         <ControlPanel
           snapshot={snapshot}
           params={params}

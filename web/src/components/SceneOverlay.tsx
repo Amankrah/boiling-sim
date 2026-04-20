@@ -10,6 +10,11 @@ import type { Snapshot } from "../types/snapshot";
 
 interface Props {
   snapshot: Snapshot;
+  /** Layout mode. Default "overlay" keeps the legacy glassmorphic
+   *  card floating over the 3D scene; "sidebar" strips the absolute
+   *  positioning + backdrop blur so the card drops into the Live
+   *  page's right rail alongside the control panel. */
+  variant?: "overlay" | "sidebar";
 }
 
 interface Partition {
@@ -53,12 +58,16 @@ function partitions(snapshot: Snapshot): Partition[] {
   return out;
 }
 
-export function SceneOverlay({ snapshot }: Props) {
+export function SceneOverlay({ snapshot, variant = "overlay" }: Props) {
   const parts = partitions(snapshot);
   const hero = parts[0] ?? null;
+  const className =
+    variant === "sidebar"
+      ? "scene-overlay scene-overlay--sidebar"
+      : "scene-overlay";
 
   return (
-    <aside className="scene-overlay" aria-label="simulation telemetry">
+    <aside className={className} aria-label="simulation telemetry">
       {hero ? (
         <>
           <span className="scene-overlay__hero-label">

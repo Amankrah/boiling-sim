@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 # Wire-format version. MUST stay in lockstep with crates/ws-server/src/snapshot.rs
 # (see the CHANGELOG comment at the top of that file for v1 -> v2 changes).
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION: int = 3
+SCHEMA_VERSION: int = 4
 
 
 # Display names for the Phase-4-validated solutes. Keyed to the
@@ -153,6 +153,11 @@ def build_snapshot(
     v3 additions: ``run_id``, ``total_time_s``, ``is_complete``,
     ``last_error``. All have safe defaults so callers that don't yet
     track run metadata still produce valid v3 frames.
+
+    v4 additions: ``pot_diameter_m``, ``pot_height_m``,
+    ``pot_wall_thickness_m``, ``pot_base_thickness_m`` -- pot geometry
+    echoed from ``cfg.pot`` so the 3D renderer can scale to match the
+    currently-simulated pot instead of hardcoding 20 cm x 12 cm.
     """
     grid = sim.grid
     cfg = sim.cfg
@@ -219,6 +224,11 @@ def build_snapshot(
         "total_time_s": float(total_time_s),
         "is_complete": bool(is_complete),
         "last_error": str(last_error),
+        # --- v4: pot geometry echo ---
+        "pot_diameter_m": float(cfg.pot.diameter_m),
+        "pot_height_m": float(cfg.pot.height_m),
+        "pot_wall_thickness_m": float(cfg.pot.wall_thickness_m),
+        "pot_base_thickness_m": float(cfg.pot.base_thickness_m),
     }
 
 
@@ -522,5 +532,11 @@ def serialize_rebuild_marker(
         "total_time_s": float(total_time_s),
         "is_complete": False,
         "last_error": "",
+        # v4 -- pot geometry echo; zeros are fine during a rebuild since
+        # the client will get the true values on the next real snapshot.
+        "pot_diameter_m": 0.0,
+        "pot_height_m": 0.0,
+        "pot_wall_thickness_m": 0.0,
+        "pot_base_thickness_m": 0.0,
     }
     return msgpack.packb(payload, use_bin_type=True)

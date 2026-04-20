@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 /// that the dashboard was mis-labelling β-carotene as "carrot retention"
 /// and hiding the leaching / degradation channels that Phase 4 validated.
 ///
-/// **v3** (this — Phase 6.6 data-forward upgrade): surfaces water
+/// **v3** (superseded — Phase 6.6 data-forward upgrade): surfaces water
 /// temperature (mean / max / min) that Phase 4's `ScalarSample` has
 /// computed since day one but was never routed onto the wire. Adds
 /// `run_id` (UUID per rebuild), `total_time_s` (the user-selected
@@ -46,7 +46,15 @@ use serde::{Deserialize, Serialize};
 /// message back to the Configuration page). The Live view gains a
 /// water-T row and a progress bar; the Results page fetches HDF5/CSV/JSON
 /// artefacts via the new `/api/runs/*` endpoints.
-pub const SCHEMA_VERSION: u32 = 3;
+///
+/// **v4** (this — realistic pot): echoes the live pot geometry so the
+/// 3D renderer can scale the procedural pot to whatever dimensions
+/// the running simulation actually uses. Previously the 3D pot was
+/// hardcoded at 20 cm × 12 cm regardless of the Config page's
+/// pot-section settings; now `pot_diameter_m`, `pot_height_m`,
+/// `pot_wall_thickness_m`, and `pot_base_thickness_m` flow from
+/// Python's `cfg.pot` onto the wire and drive `<Pot>`'s props.
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Errors surfaced by [`Snapshot::from_msgpack_bytes`].
 #[derive(Debug, thiserror::Error)]
@@ -180,6 +188,20 @@ pub struct Snapshot {
     /// successful rebuild. The Configuration page renders this
     /// inline when non-empty.
     pub last_error: String,
+
+    // -------- v4: pot geometry echo --------
+    /// Pot outer diameter in metres (Python `cfg.pot.diameter_m`).
+    /// Drives `<Pot diameterM>` in the 3D scene so the rendered pot
+    /// matches whatever size the simulation is actually using.
+    pub pot_diameter_m: f32,
+    /// Pot outer height in metres (lip to base).
+    pub pot_height_m: f32,
+    /// Wall thickness in metres. Sets the gap between the pot's
+    /// outer shell and its inner cooking cavity.
+    pub pot_wall_thickness_m: f32,
+    /// Base thickness in metres. Raises the inner floor off the
+    /// cooktop by this much.
+    pub pot_base_thickness_m: f32,
 }
 
 impl Snapshot {
@@ -255,6 +277,11 @@ mod tests {
             total_time_s: 600.0,
             is_complete: false,
             last_error: String::new(),
+            // v4
+            pot_diameter_m: 0.20,
+            pot_height_m: 0.12,
+            pot_wall_thickness_m: 0.003,
+            pot_base_thickness_m: 0.005,
         }
     }
 

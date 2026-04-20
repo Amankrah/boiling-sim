@@ -59,6 +59,18 @@ describe("TypeScript snapshot decode path", () => {
     const tMax = Math.max(...snap.temperature);
     expect(tMin).toBeGreaterThanOrEqual(-5);
     expect(tMax).toBeLessThanOrEqual(200);
+
+    // v4: pot geometry echo. Defaults come from the scenario YAML
+    // (0.20 m diameter, 0.12 m height, 3 mm wall, 5 mm base); allow a
+    // broad sanity band.
+    expect(snap.pot_diameter_m).toBeGreaterThan(0.05);
+    expect(snap.pot_diameter_m).toBeLessThan(0.60);
+    expect(snap.pot_height_m).toBeGreaterThan(0.02);
+    expect(snap.pot_height_m).toBeLessThan(0.50);
+    expect(snap.pot_wall_thickness_m).toBeGreaterThan(0);
+    expect(snap.pot_wall_thickness_m).toBeLessThan(snap.pot_diameter_m / 2);
+    expect(snap.pot_base_thickness_m).toBeGreaterThan(0);
+    expect(snap.pot_base_thickness_m).toBeLessThan(snap.pot_height_m);
   });
 
   // NB: fzstd is decompress-only; the inverse (zstd encode) lives on the

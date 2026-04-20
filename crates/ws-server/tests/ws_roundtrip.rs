@@ -51,6 +51,10 @@ fn fixture(step: u64) -> Snapshot {
         total_time_s: 60.0,
         is_complete: false,
         last_error: String::new(),
+        pot_diameter_m: 0.20,
+        pot_height_m: 0.12,
+        pot_wall_thickness_m: 0.003,
+        pot_base_thickness_m: 0.005,
     }
 }
 
