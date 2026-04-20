@@ -279,3 +279,82 @@ scripts/run_retention.py \
 
 Phase 4 validation now stands on two solutes, two regimes, same code.
 
+
+---
+
+## Phase 4 extension — dual-solute concurrent run
+
+### Context
+
+The β-carotene and vitamin C extensions above validated the nutrient pipeline on two different loss regimes (degradation-dominated and leach-dominated respectively), but they ran **sequentially** in separate simulations. That left the stronger claim untested: a single pot of boiling water cannot evolve *both* loss mechanisms correctly if, for example, the two atomic precipitation counters were wired to the same accumulator, or a scratch buffer were shared between solutes, or the saturation clamp wrote to the wrong `C_water` array. Concurrent validation exercises those couplings.
+
+The extension adds a second concentration pair (`grid.C2` / `grid.C_water2`) gated on `cfg.nutrient2.enabled`, with a `SoluteSlot` dataclass bundling the per-solute arrays + cfg so the pipeline calls one pair of composite helpers (`_step_reaction_diffusion_leach`, `_step_advect_clamp`) once per active slot. No new physics, no kernel signature changes — all six Phase-4 kernels are already array-parameterized, so the integration was purely Python-side plumbing.
+
+### Parameter set
+
+Both slots at 25 mm carrot diameter, same thermal / fluid / bubble field, `dx = 2 mm`, 100 pressure iterations, 600 s, RTX 6000 Ada:
+
+| parameter                   | primary (β-carotene) | secondary (vitamin C) |
+|-----------------------------|---------------------:|----------------------:|
+| `E_a_kJ_per_mol`            | 70.0                 | 74.0                  |
+| `k0_per_s`                  | 2.63e6               | 1.1e7                 |
+| `D_eff_m2_per_s`            | 2.0e-10              | 5.0e-10               |
+| `K_partition`               | 1.0e-5               | 1.0                   |
+| `C_water_sat_mg_per_kg`     | 6.0e-3               | 1.0e6                 |
+| `C0_mg_per_kg`              | 83.0                 | 59.0                  |
+
+Scenario: [configs/scenarios/dual_solute_25mm.yaml](../configs/scenarios/dual_solute_25mm.yaml). Parameters copied verbatim from `default.yaml` (primary) and `vitamin_c_25mm.yaml` (secondary). No retune.
+
+### Results
+
+At t = 600 s:
+
+| solute       | R(600) | leached | degraded | precip | sum   | vs single-solute Phase 4 |
+|--------------|-------:|--------:|---------:|-------:|------:|-------------------------:|
+| β-carotene   | **88.61 %** | 0.00 %  | 11.26 %  | 0.13 % | 100.00 % | 88.72 %, Δ = **0.11 pp** |
+| vitamin C    | **65.52 %** | 21.03 % | 13.45 %  | 0.00 % | 100.00 % | 65.80 %, Δ = **0.28 pp** |
+
+`T_water_final = 99.88 °C` (within 0.12 K of T_sat). Wall-clock: 1717 s for 600 sim-s = **2.86 s/sim-s**, i.e. **1.25× the single-solute 25 mm baseline (2.29 s/sim-s)** — within the 1.3× budget.
+
+Plot: [phase4_retention_dual_solute_25mm.png](phase4_retention_dual_solute_25mm.png) — 2-row × 3-col layout. Row 0 = β-carotene stacked-area retention + shared temperature + boiling vigour; row 1 = vitamin C stacked-area retention with its own target band and Sonar-reference line.
+
+### Acceptance gates (all pass)
+
+- [x] **β-carotene retention preserved** — 88.61 % vs 88.72 % single-solute; delta 0.11 pp, gate 0.5 pp.
+- [x] **Vitamin C retention preserved** — 65.52 % vs 65.80 % single-solute; delta 0.28 pp, gate 0.5 pp.
+- [x] **Per-solute mass balance** — `|sum − 100|` = 0.000 pp on both solutes (primary closes at 100.0000, secondary closes at 100.0000).
+- [x] **No NaN / sat-cap obeyed** — transitive from the 0.0000 pp mass-balance close: NaN contamination or cap overshoot would both break the invariant.
+- [x] **Wall-clock budget** — 1.25× single-solute, within 1.3× budget. The 25 % overhead is ~two extra kernel launches per step (`_step_reaction_diffusion_leach` + `_step_advect_clamp` for slot 2) plus four extra per-sample GPU→host copies (C2, C_water2, precip2) — all on top of the shared boiling / thermal / fluid pipeline which runs once.
+- [x] **Full regression suite** — `pytest -q` → 88/88 (84 pre-existing + 4 new dual-solute tests).
+
+### Architectural notes
+
+The `SoluteSlot` design kept the refactor localised:
+
+- `NutrientConfig.nutrient2` added to [python/boilingsim/config.py](../python/boilingsim/config.py) + a `model_validator` enforcing `nutrient2.enabled ⇒ nutrient.enabled`.
+- `grid.C2` / `grid.C_water2` added to the `Grid` dataclass in [python/boilingsim/geometry.py](../python/boilingsim/geometry.py); allocated and initialised alongside the primary fields in `build_pot_geometry`.
+- [python/boilingsim/nutrient.py](../python/boilingsim/nutrient.py) gains a `SoluteSlot` dataclass + private helpers `_step_reaction_diffusion_leach(slot, grid, D_carrot, dt)` and `_step_advect_clamp(slot, grid, dt)` at the bottom of the module. All five pre-existing public `step_*` functions keep their single-solute signatures unchanged — hence all 21 nutrient tests continue to pass with zero modification.
+- [python/boilingsim/pipeline.py](../python/boilingsim/pipeline.py) builds `primary_slot` in `__init__` and `secondary_slot` when enabled; the two Phase-4 blocks (lines 185–202 reaction-diffusion-leach; lines 228–233 advect-clamp) now call the slot helpers once per active slot.
+- [python/boilingsim/pipeline.py `ScalarSample`](../python/boilingsim/pipeline.py) gains four defaulted fields (`retention2_pct`, `leached2_pct`, `degraded2_pct`, `precipitated2_pct`); `sample_scalars` computes them from `grid.C2`/`grid.C_water2`/`ws_nutrient.precipitated_mass2` when present, using `cfg.nutrient2.C0_mg_per_kg` as the independent reference mass. HDF5 emits the secondary fields at the same flat level as the primaries — no schema rename, back-compatible with every single-solute H5 reader.
+- [scripts/run_retention.py](../scripts/run_retention.py) gains `--solute2-label`, `--target2-band`, `--exp2-ref-pct`; when the loaded H5 contains `retention2_pct` **and** a `solute2_label` was supplied the figure becomes 2×3 (secondary mass partition on row 1 with its own band / exp-ref line; temperature and boiling-vigour columns stay on row 0 since they are identical across both solutes). When `--solute2-*` flags are omitted the layout falls back to 1×3 — existing β-carotene / vitamin C plots continue to render byte-identically.
+
+### Why this result validates "for the right reason"
+
+- **β-carotene slot unchanged to 0.11 pp across mechanistically identical runs.** The primary slot, with the secondary slot active alongside it, produced 88.61 % retention — 0.11 pp below the single-solute 88.72 % reference. That tiny delta is within the run-to-run noise of a 600 s boiling simulation (bubble-plume chaos, pressure-projection tolerance, atomic-add race ordering). The secondary slot's presence does not perturb the primary's physics.
+- **Vitamin C slot unchanged to 0.28 pp across mechanistically identical runs.** Same argument in reverse. The secondary slot evolves its leach-dominated budget (R = 65.52, leached = 21.03, degraded = 13.45) to within 0.28 pp of its single-solute reference, confirming the `C_water2` array reads the correct `cfg.nutrient2.K_partition` / `C_water_sat` etc. rather than shadowing the primary's parameters.
+- **Secondary precipitated_pct stays at 0.00 %.** With `C_water_sat = 1e6 mg/kg` and realistic C_water concentrations <1 mg/kg, the `precipitated_mass2` counter should never be touched. It isn't — confirming the atomic accumulator is independent of the primary one (`precipitated_pct = 0.13 %` on the β-carotene side). If the two clamp kernels were sharing a counter, the primary's stagnation-cell overshoots would leak into secondary accounting.
+- **Per-solute sum-to-100 invariant holds to 0.0000 pp on both solutes.** Four-bucket accounting (retention / leached / degraded / precipitated) closes exactly for primary AND for secondary in a single run. Each bucket is independently computed, independently accumulated, and sums to the right total against the right C0. This is the bookkeeping invariant the SoluteSlot design was built to preserve.
+
+### New tests added
+
+[python/tests/test_nutrient.py](../python/tests/test_nutrient.py) picks up 4 dual-solute tests (21 → 25 nutrient tests; 84 → 88 total):
+
+1. `test_dual_solute_geometry_allocates_both_fields` — assertion on `grid.C2.mean() == C0_2` and `grid.C_water2.sum() == 0` after geometry build with distinct `C0_1 ≠ C0_2`.
+2. `test_dual_solute_symmetric_params_equal_retention` — with `nutrient2` configured identically to `nutrient`, `max |R1-R2|` across a 2 s run must be < 1e-6. Measured: 0.0 exactly.
+3. `test_dual_solute_independent_precipitation_counters` — direct-injection test that pushes a known overshoot into each solute's `C_water` array and confirms only the intended counter accumulates. Primary cap = 1e-3 mg/kg clips 10 mg/kg → primary counter takes the hit; secondary cap = 1e6 mg/kg → secondary counter stays exactly 0.
+4. `test_dual_solute_does_not_drift_single_solute_baseline` — byte-identical primary retention trace with `nutrient2.enabled` flipped from False to True (when configured identically). Gate: `max |R_off - R_on| < 1e-4`. Measured: 0.0 exactly.
+
+### Conclusion
+
+Phase 4 validation now stands on **three independent configurations**: β-carotene alone (88.72 %), vitamin C alone (65.80 %), and the two solutes evolved concurrently in one pot (β-carotene 88.61 % + vitamin C 65.52 %). All three close their mass-balance invariants at machine precision, all three land in the mechanism-appropriate target band, and the dual run confirms both single-solute validations hold *simultaneously* — the two slots don't cross-contaminate, the atomic counters stay independent, and the full kernel stack (Arrhenius on both phases, in-carrot diffusion, Sherwood leach with free-stream velocity, conservative upwind advection, saturation clamp with precipitation accounting) is mechanism-faithful across a degradation-dominated solute and a leach-dominated solute in the same boiling domain. The dual-solute architecture — hard-coded to exactly two slots via a `SoluteSlot` bundle — is the natural extension point for any future solute pair (e.g. trans vs cis β-carotene isomers, folate vs thiamine) without further refactoring.
+

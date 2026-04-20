@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import warp as wp
@@ -118,17 +118,35 @@ class NutrientWorkspace:
     C_work: wp.array            # (nx, ny, nz) -- diffusion ping-pong
     C_water_tmp: wp.array       # (nx, ny, nz) -- advection destination
     precipitated_mass: wp.array  # (1,) -- cumulative clipped mass
+    # Dual-solute extension: independent scratch + counter for the secondary
+    # solute. Allocated only when ``cfg.nutrient2.enabled``; otherwise None.
+    # Kept on the same workspace rather than a second NutrientWorkspace so the
+    # single ``ws_nutrient`` handle in Simulation covers both slots.
+    C_work2: Any = None
+    C_water_tmp2: Any = None
+    precipitated_mass2: Any = None
 
 
-def allocate_nutrient_workspace(grid: "Grid", device: str = "cuda:0") -> NutrientWorkspace:
+def allocate_nutrient_workspace(
+    grid: "Grid",
+    device: str = "cuda:0",
+    alloc_secondary: bool = False,
+) -> NutrientWorkspace:
     """Allocate ping-pong buffers for explicit diffusion + SL advection, plus
-    the cumulative-precipitation counter."""
+    the cumulative-precipitation counter. When ``alloc_secondary`` is True,
+    also allocates independent scratch + counter for the second solute.
+    """
     nx, ny, nz = grid.shape
-    return NutrientWorkspace(
+    ws = NutrientWorkspace(
         C_work=wp.zeros((nx, ny, nz), dtype=float, device=device),
         C_water_tmp=wp.zeros((nx, ny, nz), dtype=float, device=device),
         precipitated_mass=wp.zeros(1, dtype=float, device=device),
     )
+    if alloc_secondary:
+        ws.C_work2 = wp.zeros((nx, ny, nz), dtype=float, device=device)
+        ws.C_water_tmp2 = wp.zeros((nx, ny, nz), dtype=float, device=device)
+        ws.precipitated_mass2 = wp.zeros(1, dtype=float, device=device)
+    return ws
 
 
 @wp.kernel
@@ -203,19 +221,29 @@ def initialize_nutrient_field(
     grid: "Grid",
     cfg: "ScenarioConfig",
     device: str = "cuda:0",
+    target_C: Any = None,
+    C0_override: float | None = None,
 ) -> None:
-    """Populate ``grid.C`` from ``cfg.nutrient.C0_mg_per_kg`` on carrot cells.
+    """Populate a concentration array from C0 on carrot cells.
 
-    Assumes ``grid.C`` has already been allocated. Called from
-    :func:`geometry.build_pot_geometry` when ``cfg.nutrient.enabled``.
+    By default targets ``grid.C`` and uses ``cfg.nutrient.C0_mg_per_kg`` --
+    preserving the single-solute contract. For the dual-solute extension
+    pass ``target_C=grid.C2`` and ``C0_override=cfg.nutrient2.C0_mg_per_kg``
+    to populate the secondary field. Called from
+    :func:`geometry.build_pot_geometry`.
     """
-    if grid.C is None:
-        raise RuntimeError("grid.C not allocated; cannot initialize nutrient field")
+    C_arr = target_C if target_C is not None else grid.C
+    if C_arr is None:
+        raise RuntimeError(
+            "target concentration array not allocated; cannot initialize "
+            "nutrient field"
+        )
+    C0 = C0_override if C0_override is not None else cfg.nutrient.C0_mg_per_kg
     nx, ny, nz = grid.shape
     wp.launch(
         init_carrot_concentration,
         dim=(nx, ny, nz),
-        inputs=[grid.C, grid.mat, cfg.nutrient.C0_mg_per_kg, _MAT_CARROT],
+        inputs=[C_arr, grid.mat, C0, _MAT_CARROT],
         device=device,
     )
 
@@ -412,6 +440,15 @@ def diffuse_nutrient_explicit(
     C_out[i, j, k] = c_self + coeff * lap
 
 
+def _diffusion_stability_dt_D(dx: float, D_eff: float) -> float:
+    """Primitive-argument 7-point explicit-diffusion stability bound.
+
+    Used by the dual-solute pipeline which needs the minimum of both solutes'
+    bounds without threading full cfg through a helper.
+    """
+    return (dx * dx) / (6.0 * D_eff)
+
+
 def diffusion_stability_dt(cfg: "ScenarioConfig", dx: float) -> float:
     """Return the explicit-diffusion stability bound ``dx^2 / (6*D_eff)``.
 
@@ -419,7 +456,7 @@ def diffusion_stability_dt(cfg: "ScenarioConfig", dx: float) -> float:
     ~6700 s, well above any realistic solver dt. Included as a safety
     guard that :func:`step_diffuse_nutrient` asserts against.
     """
-    return (dx * dx) / (6.0 * cfg.nutrient.D_eff_m2_per_s)
+    return _diffusion_stability_dt_D(dx, cfg.nutrient.D_eff_m2_per_s)
 
 
 # ---------------------------------------------------------------------------
@@ -1019,3 +1056,200 @@ def step_diffuse_nutrient(
         device=device,
     )
     wp.copy(grid.C, ws.C_work)
+
+
+# ---------------------------------------------------------------------------
+# Dual-solute extension: slot bundle + composite per-slot helpers
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SoluteSlot:
+    """All arrays and parameters needed to evolve one solute's concentration
+    pair (carrot-side ``C``, water-side ``C_water``) through the full Phase-4
+    reaction-diffusion-leach-advect-clamp pipeline.
+
+    Bundling these lets the pipeline call a single pair of per-slot helpers
+    (:func:`_step_reaction_diffusion_leach`, :func:`_step_advect_clamp`) once
+    per active solute rather than duplicating five step_* function calls.
+
+    Fields mirror the arrays threaded through the single-solute step_*
+    functions:
+
+    * ``C``                  -- carrot-side concentration (``grid.C`` or ``grid.C2``).
+    * ``C_water``            -- water-side passive scalar (``grid.C_water`` or ``grid.C_water2``).
+    * ``C_work``             -- diffusion ping-pong scratch (from workspace).
+    * ``C_water_tmp``        -- advection destination scratch (from workspace).
+    * ``precipitated_mass``  -- length-1 cumulative clipped-mass counter.
+    * ``cfg_nutrient``       -- the per-slot ``NutrientConfig`` (k0, E_a, D_eff,
+                                K_partition, C_water_sat, nu_water,
+                                D_water_molec, C0_mg_per_kg) for this solute.
+    """
+
+    C: Any
+    C_water: Any
+    C_work: Any
+    C_water_tmp: Any
+    precipitated_mass: Any
+    cfg_nutrient: Any
+
+
+def make_primary_slot(
+    grid: "Grid",
+    cfg: "ScenarioConfig",
+    ws: NutrientWorkspace,
+) -> SoluteSlot:
+    """Build the primary :class:`SoluteSlot` from ``grid.C``/``grid.C_water``,
+    the existing workspace scratch buffers, and ``cfg.nutrient``."""
+    return SoluteSlot(
+        C=grid.C,
+        C_water=grid.C_water,
+        C_work=ws.C_work,
+        C_water_tmp=ws.C_water_tmp,
+        precipitated_mass=ws.precipitated_mass,
+        cfg_nutrient=cfg.nutrient,
+    )
+
+
+def make_secondary_slot(
+    grid: "Grid",
+    cfg: "ScenarioConfig",
+    ws: NutrientWorkspace,
+) -> SoluteSlot:
+    """Build the secondary :class:`SoluteSlot` from ``grid.C2``/``grid.C_water2``
+    and the secondary scratch buffers on the workspace."""
+    return SoluteSlot(
+        C=grid.C2,
+        C_water=grid.C_water2,
+        C_work=ws.C_work2,
+        C_water_tmp=ws.C_water_tmp2,
+        precipitated_mass=ws.precipitated_mass2,
+        cfg_nutrient=cfg.nutrient2,
+    )
+
+
+def _step_reaction_diffusion_leach(
+    slot: SoluteSlot,
+    grid: "Grid",
+    D_carrot: float,
+    dt: float,
+    device: str = "cuda:0",
+) -> None:
+    """Arrhenius degrade (carrot + water) + in-carrot diffusion + Sherwood leach
+    for a single solute slot. Same sequence as the single-solute pipeline's
+    ``step_degrade + step_diffuse_nutrient + step_leach``, but reading from
+    ``slot.*`` instead of the hard-coded primary arrays/cfg. ``D_carrot`` is
+    ``cfg.carrot.diameter_m`` -- the shared geometry length scale that both
+    solutes' Sherwood correlations use.
+    """
+    if slot.C is None:
+        return
+    from .geometry import MAT_FLUID as _MF
+
+    nx, ny, nz = grid.shape
+    cfg_n = slot.cfg_nutrient
+    E_a_j_per_mol = cfg_n.E_a_kJ_per_mol * 1000.0
+    E_a_over_R = E_a_j_per_mol / _R_GAS
+
+    # --- Arrhenius degrade (carrot) ---
+    wp.launch(
+        arrhenius_degrade,
+        dim=(nx, ny, nz),
+        inputs=[slot.C, grid.T, grid.mat, cfg_n.k0_per_s, E_a_over_R, dt, _MAT_CARROT],
+        device=device,
+    )
+    # --- Arrhenius degrade (water pool) ---
+    if slot.C_water is not None:
+        wp.launch(
+            arrhenius_degrade_water,
+            dim=(nx, ny, nz),
+            inputs=[slot.C_water, grid.T, grid.mat, cfg_n.k0_per_s, E_a_over_R, dt, _MF],
+            device=device,
+        )
+
+    # --- Explicit in-carrot diffusion (with stability guard) ---
+    dt_max = _diffusion_stability_dt_D(grid.dx, cfg_n.D_eff_m2_per_s)
+    if dt > dt_max:
+        raise RuntimeError(
+            f"explicit nutrient diffusion: dt={dt:.3e} s exceeds stability "
+            f"bound {dt_max:.3e} s (dx={grid.dx:.3e} m, "
+            f"D_eff={cfg_n.D_eff_m2_per_s:.3e} m^2/s)"
+        )
+    wp.launch(
+        diffuse_nutrient_explicit,
+        dim=(nx, ny, nz),
+        inputs=[slot.C, slot.C_work, grid.mat, cfg_n.D_eff_m2_per_s, grid.dx, dt, _MAT_CARROT],
+        device=device,
+    )
+    wp.copy(slot.C, slot.C_work)
+
+    # --- Sherwood leach ---
+    if slot.C_water is not None:
+        wp.launch(
+            leach_at_surface,
+            dim=(nx, ny, nz),
+            inputs=[
+                slot.C,
+                slot.C_water,
+                grid.ux,
+                grid.uy,
+                grid.uz,
+                grid.mat,
+                grid.dx,
+                dt,
+                D_carrot,
+                cfg_n.nu_water_m2_per_s,
+                cfg_n.D_water_molec_m2_per_s,
+                cfg_n.K_partition,
+                cfg_n.C_water_sat_mg_per_kg,
+                _MF,
+                _MAT_CARROT,
+            ],
+            device=device,
+        )
+
+
+def _step_advect_clamp(
+    slot: SoluteSlot,
+    grid: "Grid",
+    dt: float,
+    device: str = "cuda:0",
+) -> None:
+    """Conservative upwind advection of ``slot.C_water`` + post-advect
+    saturation clamp with precipitation accounting. Same as the single-solute
+    ``step_advect_c_water + step_clamp_c_water_sat``.
+    """
+    if slot.C_water is None:
+        return
+    from .geometry import MAT_FLUID as _MF
+
+    nx, ny, nz = grid.shape
+    wp.launch(
+        advect_c_water,
+        dim=(nx, ny, nz),
+        inputs=[
+            slot.C_water,
+            slot.C_water_tmp,
+            grid.ux,
+            grid.uy,
+            grid.uz,
+            grid.mat,
+            wp.vec3(*grid.origin),
+            grid.dx,
+            dt,
+            _MF,
+        ],
+        device=device,
+    )
+    wp.copy(slot.C_water, slot.C_water_tmp)
+
+    wp.launch(
+        clamp_c_water_and_track_precipitation,
+        dim=(nx, ny, nz),
+        inputs=[
+            slot.C_water,
+            slot.precipitated_mass,
+            slot.cfg_nutrient.C_water_sat_mg_per_kg,
+        ],
+        device=device,
+    )

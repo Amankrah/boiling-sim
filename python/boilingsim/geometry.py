@@ -233,6 +233,10 @@ class Grid:
     # leached mass; allocated lazily when leaching activates.
     C: Any = None
     C_water: Any = None
+    # Phase-4 dual-solute extension: optional second solute, evolved
+    # concurrently in the same domain, allocated when ``cfg.nutrient2.enabled``.
+    C2: Any = None
+    C_water2: Any = None
 
     @property
     def shape(self) -> tuple[int, int, int]:
@@ -391,6 +395,17 @@ def build_pot_geometry(cfg: ScenarioConfig, device: str = "cuda:0") -> Grid:
         grid.C = wp.zeros((nx, ny, nz), dtype=float, device=device)
         grid.C_water = wp.zeros((nx, ny, nz), dtype=float, device=device)
         initialize_nutrient_field(grid, cfg, device=device)
+
+    # Phase 4 dual-solute extension: optional second solute.
+    if cfg.nutrient2.enabled:
+        from .nutrient import initialize_nutrient_field
+        grid.C2 = wp.zeros((nx, ny, nz), dtype=float, device=device)
+        grid.C_water2 = wp.zeros((nx, ny, nz), dtype=float, device=device)
+        initialize_nutrient_field(
+            grid, cfg, device=device,
+            target_C=grid.C2,
+            C0_override=cfg.nutrient2.C0_mg_per_kg,
+        )
 
     return grid
 

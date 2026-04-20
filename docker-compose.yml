@@ -1,0 +1,77 @@
+# Phase 6 -- three-service deployment for the live dashboard.
+#
+# Bring the whole stack up on a GPU host (or WSL2 with NVIDIA Container
+# Toolkit):
+#
+#     docker compose up --build
+#
+# Then open http://localhost:3000 in a browser. nginx inside the `web`
+# container proxies /stream to ws-server:8080, so the browser only
+# needs port 3000 exposed. The ws-server container is not published to
+# the host.
+#
+# The `solver` container runs a precheck (nvidia-smi + Warp CUDA visibility)
+# BEFORE starting the simulation; see Dockerfile.solver for the script.
+# That's the mitigation for "Risk 1" in the Phase 6 plan -- WSL2 + Docker
+# GPU passthrough fails silently often enough that we fail loudly here.
+
+services:
+  ws-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.wsserver
+    restart: unless-stopped
+    # 8080 (WS), 8765 (Python ingest), 8766 (Python control). None
+    # published to the host -- the web container proxies /stream, and
+    # the solver reaches ingest/control by container DNS.
+    expose:
+      - "8080"
+      - "8765"
+      - "8766"
+    networks:
+      - boiling-net
+    environment:
+      - RUST_LOG=info
+
+  solver:
+    build:
+      context: .
+      dockerfile: Dockerfile.solver
+    restart: unless-stopped
+    depends_on:
+      - ws-server
+    networks:
+      - boiling-net
+    # Request one NVIDIA GPU. Requires the NVIDIA Container Toolkit on
+    # the host (https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/).
+    # On WSL2, enable GPU access via the Windows NVIDIA driver + toolkit.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      # Tell the producer to talk to the ws-server container by name,
+      # not 127.0.0.1.
+      - BOILINGSIM_INGEST_HOST=ws-server
+      - BOILINGSIM_CONTROL_HOST=ws-server
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    restart: unless-stopped
+    depends_on:
+      - ws-server
+    ports:
+      - "3000:80"
+    networks:
+      - boiling-net
+
+networks:
+  boiling-net:
+    driver: bridge

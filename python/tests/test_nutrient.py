@@ -859,3 +859,206 @@ def test_stagnant_vs_moving_leach_rate():
         f"stagnant leached {m_stag:.3e}, moving leached {m_mov:.3e}: "
         f"stagnant/moving = {ratio:.3f}, expected < 0.4"
     )
+
+
+# ---------------------------------------------------------------------------
+# Dual-solute extension tests (Phase-4 post-VC)
+# ---------------------------------------------------------------------------
+
+
+def test_dual_solute_geometry_allocates_both_fields():
+    """With ``nutrient2.enabled = True`` and a distinct C0, build_pot_geometry
+    must allocate an independent grid.C2 initialised from cfg.nutrient2.C0
+    and a zeroed grid.C_water2. The primary field must be unaffected."""
+    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg.nutrient.enabled = True
+    cfg.nutrient2 = cfg.nutrient.model_copy(update={
+        "enabled": True,
+        "C0_mg_per_kg": 42.0,
+        "K_partition": 1.0,
+    })
+    cfg.grid.dx_m = 0.004
+
+    grid = build_pot_geometry(cfg)
+    mat = grid.mat.numpy()
+    carrot_mask = mat == MAT_CARROT
+    n_carrot = int(carrot_mask.sum())
+    assert n_carrot > 0, "no carrot cells in test geometry -- check dx / position"
+
+    C_np = grid.C.numpy()
+    C2_np = grid.C2.numpy()
+    Cw_np = grid.C_water.numpy()
+    Cw2_np = grid.C_water2.numpy()
+
+    # Primary field: filled from cfg.nutrient.C0.
+    assert C_np[carrot_mask].mean() == pytest.approx(
+        cfg.nutrient.C0_mg_per_kg, rel=1e-6
+    ), "grid.C not initialised from cfg.nutrient.C0"
+
+    # Secondary field: filled from the OVERRIDDEN cfg.nutrient2.C0.
+    assert C2_np[carrot_mask].mean() == pytest.approx(42.0, rel=1e-6), (
+        "grid.C2 not initialised from cfg.nutrient2.C0 (override dropped)"
+    )
+
+    # Off-carrot cells are zero in both fields.
+    assert float(np.abs(C_np[~carrot_mask]).max()) == 0.0
+    assert float(np.abs(C2_np[~carrot_mask]).max()) == 0.0
+
+    # Water-side scalars start at zero.
+    assert float(Cw_np.sum()) == 0.0
+    assert float(Cw2_np.sum()) == 0.0
+
+
+def test_dual_solute_symmetric_params_equal_retention():
+    """With nutrient2 configured identically to nutrient, the two retention
+    traces must coincide to machine precision at every sample. This is the
+    core invariant of the dual-solute refactor -- if the two slots were
+    cross-contaminated or read the wrong config block, the symmetric case
+    would surface the bug immediately."""
+    from boilingsim.pipeline import Simulation
+
+    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg.nutrient.enabled = True
+    cfg.nutrient2 = cfg.nutrient.model_copy(update={"enabled": True})
+    cfg.boiling.enabled = True
+    cfg.grid.dx_m = 0.004
+    cfg.total_time_s = 2.0
+
+    sim = Simulation(cfg)
+    samples = []
+    for _ in range(60):
+        dt_used = sim.step()
+        samples.append(sim.sample_scalars(dt_used))
+        if sim.t >= 2.0:
+            break
+    wp.synchronize()
+
+    R1 = np.array([s.retention_pct for s in samples])
+    R2 = np.array([s.retention2_pct for s in samples])
+    L1 = np.array([s.leached_pct for s in samples])
+    L2 = np.array([s.leached2_pct for s in samples])
+    # With identical params, configs, and initial conditions (both C0s
+    # produce the same normalised R) the traces must match exactly.
+    assert float(np.max(np.abs(R1 - R2))) < 1.0e-6, (
+        f"symmetric retention drift: max |R1-R2| = {np.max(np.abs(R1 - R2)):.3e}"
+    )
+    assert float(np.max(np.abs(L1 - L2))) < 1.0e-6, (
+        f"symmetric leach drift: max |L1-L2| = {np.max(np.abs(L1 - L2)):.3e}"
+    )
+
+
+def test_dual_solute_independent_precipitation_counters():
+    """Directly exercise the two precipitation counters via the clamp
+    kernel: push a known overshoot into each solute's C_water field with
+    known magnitudes and confirm only the intended counter accumulates.
+
+    This avoids relying on the coupled boiling+leach+advect pipeline to
+    drive one cap and not the other, which is fragile: the saturation
+    clamp only fires once atomic-add races or advection concentration
+    push C_water past C_water_sat, and whether that happens in a 1-2 s
+    run depends sensitively on velocity field, K_partition, and sat
+    thresholds. The direct-injection approach tests the bookkeeping
+    invariant (counters don't cross-contaminate) without that noise.
+    """
+    from boilingsim.nutrient import (
+        allocate_nutrient_workspace,
+        clamp_c_water_and_track_precipitation,
+    )
+
+    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg.nutrient.enabled = True
+    cfg.nutrient.C_water_sat_mg_per_kg = 1.0e-3
+    cfg.nutrient2 = cfg.nutrient.model_copy(update={
+        "enabled": True,
+        "C_water_sat_mg_per_kg": 1.0e6,   # effectively disabled
+    })
+    cfg.grid.dx_m = 0.004
+
+    grid = build_pot_geometry(cfg)
+    ws = allocate_nutrient_workspace(grid, alloc_secondary=True)
+    nx, ny, nz = grid.shape
+
+    # Inject 10 mg/kg into every fluid cell of BOTH C_water arrays.
+    mat_np = grid.mat.numpy()
+    fluid_mask = mat_np == 0
+    Cw1 = np.zeros_like(mat_np, dtype=np.float32)
+    Cw1[fluid_mask] = 10.0
+    Cw2 = np.zeros_like(mat_np, dtype=np.float32)
+    Cw2[fluid_mask] = 10.0
+    grid.C_water.assign(Cw1)
+    grid.C_water2.assign(Cw2)
+
+    # Primary clamp: sat = 1e-3 so every fluid cell (at 10 mg/kg) is
+    # clipped, putting ~(10 - 1e-3) * n_fluid mg/kg into precipitated_mass.
+    wp.launch(
+        clamp_c_water_and_track_precipitation,
+        dim=(nx, ny, nz),
+        inputs=[grid.C_water, ws.precipitated_mass,
+                cfg.nutrient.C_water_sat_mg_per_kg],
+    )
+    # Secondary clamp: sat = 1e6, nothing clipped, counter stays at 0.
+    wp.launch(
+        clamp_c_water_and_track_precipitation,
+        dim=(nx, ny, nz),
+        inputs=[grid.C_water2, ws.precipitated_mass2,
+                cfg.nutrient2.C_water_sat_mg_per_kg],
+    )
+    wp.synchronize()
+
+    n_fluid = int(fluid_mask.sum())
+    expected_primary = (10.0 - 1.0e-3) * float(n_fluid)
+    got_primary = float(ws.precipitated_mass.numpy()[0])
+    got_secondary = float(ws.precipitated_mass2.numpy()[0])
+
+    assert math.isclose(got_primary, expected_primary, rel_tol=1.0e-4), (
+        f"primary precipitated mass: expected ~{expected_primary:.3e}, "
+        f"got {got_primary:.3e}"
+    )
+    assert got_secondary == 0.0, (
+        f"secondary precipitated counter was touched: {got_secondary:.3e} "
+        f"(should be exactly 0 -- independence violated)"
+    )
+
+
+def test_dual_solute_does_not_drift_single_solute_baseline():
+    """Regression guard: enabling nutrient2 (with the SAME parameters as
+    the primary) must NOT alter the single-solute primary trace. If any
+    slot helper reads/writes the wrong array by accident, the primary
+    trace drifts and this test fails.
+
+    Concretely: run the same base cfg twice, once with nutrient2 disabled
+    and once with nutrient2 enabled but configured identically, then
+    compare the primary retention_pct arrays sample-by-sample."""
+    from boilingsim.pipeline import Simulation
+
+    def run_once(nut2_enabled: bool) -> np.ndarray:
+        cfg = load_scenario("configs/scenarios/default.yaml")
+        cfg.nutrient.enabled = True
+        if nut2_enabled:
+            cfg.nutrient2 = cfg.nutrient.model_copy(update={"enabled": True})
+        cfg.boiling.enabled = True
+        cfg.grid.dx_m = 0.004
+        cfg.total_time_s = 1.0
+        sim = Simulation(cfg)
+        samples = []
+        for _ in range(40):
+            dt_used = sim.step()
+            samples.append(sim.sample_scalars(dt_used))
+            if sim.t >= 1.0:
+                break
+        wp.synchronize()
+        return np.array([s.retention_pct for s in samples])
+
+    R_off = run_once(nut2_enabled=False)
+    R_on = run_once(nut2_enabled=True)
+
+    # Must be byte-identical: dual-solute mode should not perturb the
+    # primary solute's numerical trajectory in any way.
+    assert len(R_off) == len(R_on), (
+        f"sample count drift: off={len(R_off)}, on={len(R_on)}"
+    )
+    max_drift = float(np.max(np.abs(R_off - R_on)))
+    assert max_drift < 1.0e-4, (
+        f"primary retention drifts when nutrient2 is enabled: "
+        f"max |R_off - R_on| = {max_drift:.3e}"
+    )

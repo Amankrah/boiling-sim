@@ -1,0 +1,78 @@
+# Dual-solute validation: beta-carotene + vitamin C in one pot
+#
+# Purpose: demonstrate that the two single-solute Phase-4 validations
+# (beta-carotene 88.72 % at 25 mm, vitamin C 65.80 % at 25 mm) are correct
+# *simultaneously* rather than just independently. Same thermal / fluid /
+# bubble field evolves both concentration pairs (grid.C/C_water and
+# grid.C2/C_water2) in lockstep.
+#
+# Geometry and thermal BCs are identical to vitamin_c_25mm.yaml. The
+# primary nutrient block = beta-carotene defaults (matches default.yaml);
+# the secondary block = vitamin C values from vitamin_c_25mm.yaml.
+# Both enabled flags are flipped on by scripts/run_retention.py.
+pot:
+  diameter_m: 0.20
+  height_m: 0.12
+  wall_thickness_m: 0.003
+  base_thickness_m: 0.005
+  material: steel_304
+
+water:
+  fill_fraction: 0.75
+  initial_temp_c: 20.0
+
+carrot:
+  diameter_m: 0.025
+  length_m: 0.05
+  position: [0.0, 0.0, 0.03]
+  initial_beta_carotene_mg_per_100g: 8.3
+
+heating:
+  base_heat_flux_w_per_m2: 30000.0
+  ambient_temp_c: 22.0
+
+grid:
+  dx_m: 0.001
+  carrot_mesh_resolution: 40
+
+solver:
+  cfl_safety_factor: 0.4
+  max_dt_s: 0.1
+  pressure_tol: 1.0e-5
+  pressure_max_iter: 200
+  diffusion_tol: 1.0e-4
+  diffusion_max_iter: 50
+  h_conv_outer_w_per_m2_k: 10.0
+
+boiling:
+  enabled: false
+  dT_onb_k: 5.0
+  contact_angle_rad: 1.0
+  max_bubbles: 100000
+  initial_bubble_radius_m: 1.0e-5
+  nucleation_probability_per_step: 0.1
+  C_sf_rohsenow: 0.013
+  Pr_n_rohsenow: 1.0
+
+# --- Primary solute: beta-carotene (defaults from default.yaml) ---
+nutrient:
+  enabled: true
+  E_a_kJ_per_mol: 70.0
+  k0_per_s: 2.63e6
+  D_eff_m2_per_s: 2.0e-10
+  K_partition: 1.0e-5
+  C0_mg_per_kg: 83.0
+  C_water_sat_mg_per_kg: 6.0e-3
+
+# --- Secondary solute: vitamin C (values from vitamin_c_25mm.yaml) ---
+nutrient2:
+  enabled: true
+  E_a_kJ_per_mol: 74.0
+  k0_per_s: 1.1e7
+  D_eff_m2_per_s: 5.0e-10
+  K_partition: 1.0
+  C0_mg_per_kg: 59.0
+  C_water_sat_mg_per_kg: 1.0e6
+
+total_time_s: 600.0
+output_every_s: 0.1

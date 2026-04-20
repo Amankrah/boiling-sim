@@ -72,6 +72,14 @@ class ScalarSample:
     # when pressure-projection residual ∇·u concentrates mass at stagnation
     # cells past C_water_sat. See clamp_c_water_and_track_precipitation.
     precipitated_pct: float = 0.0
+    # Phase-4 dual-solute extension: mass partition for the *second* solute
+    # evolved concurrently in the same domain. Defaults (100/0/0/0) match the
+    # single-solute case so HDF5 traces from nutrient2-disabled runs are
+    # unchanged in meaning.
+    retention2_pct: float = 100.0
+    leached2_pct: float = 0.0
+    degraded2_pct: float = 0.0
+    precipitated2_pct: float = 0.0
 
 
 class Simulation:
@@ -86,10 +94,30 @@ class Simulation:
         self.ws_fluid: FluidWorkspace = allocate_fluid_workspace(self.grid, device=device)
         self.ws_thermal: ThermalWorkspace = allocate_thermal_workspace(self.grid, device=device)
         # Phase-4 Milestone B: ping-pong buffer for explicit in-carrot diffusion.
+        # When ``cfg.nutrient2.enabled`` the workspace also carries the second
+        # solute's independent scratch (C_work2 / C_water_tmp2) and atomic
+        # counter (precipitated_mass2), so a single ``ws_nutrient`` handle
+        # covers both slots.
         self.ws_nutrient = None
+        self.primary_slot = None
+        self.secondary_slot = None
         if cfg.nutrient.enabled and self.grid.C is not None:
-            from .nutrient import allocate_nutrient_workspace
-            self.ws_nutrient = allocate_nutrient_workspace(self.grid, device=device)
+            from .nutrient import (
+                allocate_nutrient_workspace,
+                make_primary_slot,
+                make_secondary_slot,
+            )
+            self.ws_nutrient = allocate_nutrient_workspace(
+                self.grid, device=device,
+                alloc_secondary=cfg.nutrient2.enabled,
+            )
+            self.primary_slot = make_primary_slot(
+                self.grid, cfg, self.ws_nutrient,
+            )
+            if cfg.nutrient2.enabled and self.grid.C2 is not None:
+                self.secondary_slot = make_secondary_slot(
+                    self.grid, cfg, self.ws_nutrient,
+                )
 
         # Water-specific constants (Phase 2 uses constant properties).
         self.rho_water = float(self.props.rho[MAT_FLUID])
@@ -140,8 +168,11 @@ class Simulation:
             dt_thermal = compute_max_dt_conduction(self.props, self.grid.dx, safety=1.0)
             dt = min(dt_thermal, dt_cfl, dt_cap)
         if self.cfg.nutrient.enabled:
-            from .nutrient import diffusion_stability_dt
+            from .nutrient import diffusion_stability_dt, _diffusion_stability_dt_D
             dt = min(dt, diffusion_stability_dt(self.cfg, self.grid.dx))
+            if self.cfg.nutrient2.enabled:
+                dt = min(dt, _diffusion_stability_dt_D(
+                    self.grid.dx, self.cfg.nutrient2.D_eff_m2_per_s))
         return self.cfg.solver.cfl_safety_factor * dt
 
     def step(self, dt: float | None = None) -> float:
@@ -189,17 +220,20 @@ class Simulation:
         #     surface, flux is driven by C_carrot - C_water/K_partition, scales
         #     with h_m = Sh*D_water/D_carrot at the current face velocity).
         if self.cfg.nutrient.enabled and self.grid.C is not None:
-            assert self.ws_nutrient is not None, (
-                "nutrient.enabled with grid.C allocated but ws_nutrient is None: "
-                "diffusion would be silently skipped. Check Simulation.__init__."
+            assert self.ws_nutrient is not None and self.primary_slot is not None, (
+                "nutrient.enabled with grid.C allocated but ws_nutrient / "
+                "primary_slot is None: diffusion would be silently skipped. "
+                "Check Simulation.__init__."
             )
-            from .nutrient import step_degrade, step_diffuse_nutrient, step_leach
-            step_degrade(self.grid, self.cfg, dt, device=self.device)
-            step_diffuse_nutrient(
-                self.grid, self.ws_nutrient, self.cfg, dt,
-                device=self.device,
+            from .nutrient import _step_reaction_diffusion_leach
+            D_carrot = self.cfg.carrot.diameter_m
+            _step_reaction_diffusion_leach(
+                self.primary_slot, self.grid, D_carrot, dt, device=self.device,
             )
-            step_leach(self.grid, self.cfg, dt, device=self.device)
+            if self.secondary_slot is not None:
+                _step_reaction_diffusion_leach(
+                    self.secondary_slot, self.grid, D_carrot, dt, device=self.device,
+                )
 
         # 5. No-slip on solid faces before projection.
         enforce_no_slip(self.grid, device=self.device)
@@ -227,10 +261,12 @@ class Simulation:
         #    100 %%.
         if (self.cfg.nutrient.enabled
                 and self.grid.C_water is not None
-                and self.ws_nutrient is not None):
-            from .nutrient import step_advect_c_water, step_clamp_c_water_sat
-            step_advect_c_water(self.grid, self.ws_nutrient, dt, device=self.device)
-            step_clamp_c_water_sat(self.grid, self.ws_nutrient, self.cfg, device=self.device)
+                and self.ws_nutrient is not None
+                and self.primary_slot is not None):
+            from .nutrient import _step_advect_clamp
+            _step_advect_clamp(self.primary_slot, self.grid, dt, device=self.device)
+            if self.secondary_slot is not None:
+                _step_advect_clamp(self.secondary_slot, self.grid, dt, device=self.device)
 
         self.t += dt
         self.step_count += 1
@@ -309,6 +345,35 @@ class Simulation:
                 100.0 - retention_pct - leached_pct - precipitated_pct
             )
 
+        # --- Dual-solute: secondary mass partition ---
+        # Same invariant as primary (sum to ~100 every sample), computed
+        # independently from grid.C2 / grid.C_water2 / precipitated_mass2
+        # against cfg.nutrient2.C0_mg_per_kg. Defaults (100/0/0/0) carry
+        # through when nutrient2 is disabled, leaving HDF5 back-compatible
+        # for single-solute traces at the cost of four extra always-emitted
+        # datasets.
+        retention2_pct = 100.0
+        leached2_pct = 0.0
+        degraded2_pct = 0.0
+        precipitated2_pct = 0.0
+        if self.grid.C2 is not None and self._n_carrot > 0:
+            C0_2 = self.cfg.nutrient2.C0_mg_per_kg
+            ref_mass2 = C0_2 * float(self._n_carrot)
+            C2_np = self.grid.C2.numpy()
+            retention2_pct = 100.0 * float(C2_np[self._carrot_mask].sum()) / ref_mass2
+            if self.grid.C_water2 is not None:
+                Cw2_np = self.grid.C_water2.numpy()
+                leached2_pct = 100.0 * float(Cw2_np.sum()) / ref_mass2
+            if self.ws_nutrient is not None and self.ws_nutrient.precipitated_mass2 is not None:
+                precipitated2_pct = (
+                    100.0
+                    * float(self.ws_nutrient.precipitated_mass2.numpy()[0])
+                    / ref_mass2
+                )
+            degraded2_pct = (
+                100.0 - retention2_pct - leached2_pct - precipitated2_pct
+            )
+
         return ScalarSample(
             t=self.t,
             dt=dt_last,
@@ -328,6 +393,10 @@ class Simulation:
             leached_pct=leached_pct,
             degraded_pct=degraded_pct,
             precipitated_pct=precipitated_pct,
+            retention2_pct=retention2_pct,
+            leached2_pct=leached2_pct,
+            degraded2_pct=degraded2_pct,
+            precipitated2_pct=precipitated2_pct,
         )
 
     # ------------------------------------------------------------------
@@ -448,6 +517,14 @@ class Simulation:
                 g.create_dataset("leached_pct", data=np.array([s.leached_pct for s in scalars]))
                 g.create_dataset("degraded_pct", data=np.array([s.degraded_pct for s in scalars]))
                 g.create_dataset("precipitated_pct", data=np.array([s.precipitated_pct for s in scalars]))
+                # Phase-4 dual-solute extension: second solute mass partition.
+                # Emitted unconditionally so HDF5 schema is stable whether or
+                # not nutrient2 is enabled; when disabled these traces are
+                # flat (100 / 0 / 0 / 0) and carry negligible storage.
+                g.create_dataset("retention2_pct", data=np.array([s.retention2_pct for s in scalars]))
+                g.create_dataset("leached2_pct", data=np.array([s.leached2_pct for s in scalars]))
+                g.create_dataset("degraded2_pct", data=np.array([s.degraded2_pct for s in scalars]))
+                g.create_dataset("precipitated2_pct", data=np.array([s.precipitated2_pct for s in scalars]))
                 # snapshots
                 sg = f.create_group("snapshots")
                 sg.create_dataset("t", data=np.array(snapshot_times))

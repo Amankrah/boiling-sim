@@ -1,0 +1,32 @@
+# Build artefacts
+target/
+**/dist/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+
+# Node
+web/node_modules/
+**/npm-debug.log*
+
+# Python
+**/*.pyc
+**/*.egg-info/
+.venv/
+
+# Benchmarks & large HDF5 traces are not needed in any container.
+benchmarks/
+*.h5
+
+# USD demo assets
+*.usd
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# VCS
+.git/
+.gitignore

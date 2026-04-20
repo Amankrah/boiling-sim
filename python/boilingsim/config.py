@@ -229,8 +229,25 @@ class ScenarioConfig(BaseModel):
     solver: SolverConfig = Field(default_factory=SolverConfig)
     boiling: BoilingConfig = Field(default_factory=BoilingConfig)
     nutrient: NutrientConfig = Field(default_factory=NutrientConfig)
+    nutrient2: NutrientConfig = Field(
+        default_factory=NutrientConfig,
+        description="Optional second solute, evolved concurrently in the same "
+                    "boiling domain. Disabled by default; when enabled the "
+                    "primary nutrient must also be enabled. Used for the "
+                    "dual-solute validation (beta-carotene + vitamin C in the "
+                    "same pot).",
+    )
     total_time_s: float = Field(600.0, gt=0.0)
     output_every_s: float = Field(0.1, gt=0.0)
+
+    @model_validator(mode="after")
+    def _nutrient2_requires_primary(self) -> "ScenarioConfig":
+        if self.nutrient2.enabled and not self.nutrient.enabled:
+            raise ValueError(
+                "nutrient2.enabled=True requires nutrient.enabled=True "
+                "(primary solute must be active before a secondary is added)"
+            )
+        return self
 
     @model_validator(mode="after")
     def _carrot_fits_inside_pot(self) -> "ScenarioConfig":

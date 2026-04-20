@@ -39,6 +39,73 @@ def load_scalars(h5: h5py.File) -> dict:
     return {k: np.asarray(g[k]) for k in g.keys()}
 
 
+def _plot_mass_partition(
+    ax,
+    t,
+    R,
+    leached,
+    degraded,
+    target_band,
+    exp_ref_pct,
+    solute_label,
+    tag,
+    R_final,
+    leached_final,
+    degraded_final,
+    have_breakdown,
+):
+    """Stacked-area mass-partition for one solute into one axes. Extracted from
+    the single-solute plot so we can reuse it for a second row when a
+    dual-solute run is detected."""
+    ax.axhspan(target_band[0], target_band[1], color="tab:green", alpha=0.10,
+                label=f"target band [{target_band[0]:.0f}%,{target_band[1]:.0f}%]")
+    if exp_ref_pct is not None:
+        ax.axhline(exp_ref_pct, ls=":", color="k", alpha=0.5,
+                    label=f"exp ref {exp_ref_pct:.0f}%")
+    if have_breakdown:
+        ax.fill_between(t, 0, R, color="tab:green", alpha=0.55,
+                        label=f"in carrot ({R_final:.1f}%)")
+        ax.fill_between(t, R, R + leached, color="tab:blue", alpha=0.55,
+                        label=f"leached ({leached_final:.1f}%)")
+        ax.fill_between(t, R + leached, R + leached + degraded,
+                        color="tab:red", alpha=0.45,
+                        label=f"degraded ({degraded_final:.1f}%)")
+    ax.plot(t, R, "-", color="tab:purple", lw=1.5, label="R(t) measured")
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("mass fraction of initial [%]")
+    ax.set_title(f"{tag}: {solute_label} mass partition")
+    ax.set_ylim(0, 102)
+    ax.legend(loc="lower left", fontsize=8)
+    ax.grid(alpha=0.3)
+
+
+def _plot_temperatures(ax, t, Tw, Twall, tag):
+    ax.plot(t, Tw, "-", color="tab:blue", label="water mean")
+    ax.plot(t, Twall, "-", color="tab:red", label="wall inner")
+    ax.axhline(100.0, ls=":", color="k", alpha=0.4, label="T_sat")
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("T [C]")
+    ax.set_title(f"{tag}: temperatures")
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+
+def _plot_boiling_vigour(ax, t, sc, tag):
+    if "n_active_bubbles" in sc:
+        ax.plot(t, sc["n_active_bubbles"], "-", color="tab:green", label="bubbles")
+        ax.set_ylabel("n active bubbles", color="tab:green")
+        ax.tick_params(axis="y", labelcolor="tab:green")
+    if "u_max_mps" in sc:
+        ax_r = ax.twinx()
+        ax_r.plot(t, sc["u_max_mps"] * 1000.0, "-",
+                  color="tab:orange", alpha=0.7, label="|u|_max")
+        ax_r.set_ylabel("|u|_max [mm/s]", color="tab:orange")
+        ax_r.tick_params(axis="y", labelcolor="tab:orange")
+    ax.set_xlabel("time [s]")
+    ax.set_title(f"{tag}: boiling vigour")
+    ax.grid(alpha=0.3)
+
+
 def plot_retention_summary(
     h5_path: pathlib.Path,
     out_path: pathlib.Path,
@@ -47,10 +114,17 @@ def plot_retention_summary(
     target_band: tuple[float, float] = (80.0, 90.0),
     solute_label: str = "beta-carotene",
     exp_ref_pct: float | None = 84.0,
+    solute2_label: str | None = None,
+    target2_band: tuple[float, float] | None = None,
+    exp2_ref_pct: float | None = None,
 ) -> dict:
-    """Three-panel figure: (a) retention vs time with target band, (b) water
-    and wall temperatures, (c) total carrot/water mass (mass-balance check).
-    Returns a dict of validation stats.
+    """Retention validation figure. Single-row (1x3) when the HDF5 only has
+    primary-solute traces; two-row (2x3) when ``retention2_pct`` is present
+    and a ``solute2_label`` was given. Row 1 is solute 1 (mass partition +
+    shared temperatures + boiling vigour); row 2 is solute 2's mass
+    partition only (temperatures and vigour are shared across both solutes).
+
+    Returns a dict of validation stats for both solutes when present.
     """
     with h5py.File(h5_path, "r") as f:
         sc = load_scalars(f)
@@ -60,69 +134,64 @@ def plot_retention_summary(
     Tw = sc["T_mean_water_c"]
     Twall = sc["T_inner_wall_mean_c"] if "T_inner_wall_mean_c" in sc else sc["T_max_wall_c"]
 
-    # Phase-4 instrumentation: leached vs degraded breakdown (Phase-4-prime).
     have_breakdown = "leached_pct" in sc and "degraded_pct" in sc
     leached = sc["leached_pct"] if have_breakdown else None
     degraded = sc["degraded_pct"] if have_breakdown else None
 
-    # Final-state values (averaged over last 5 % of the series for noise).
     tail = max(1, len(R) // 20)
     R_final = float(R[-tail:].mean())
     leached_final = float(leached[-tail:].mean()) if have_breakdown else 0.0
     degraded_final = float(degraded[-tail:].mean()) if have_breakdown else 0.0
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
+    # Second-solute detection: must BOTH have secondary traces in the HDF5
+    # AND a user-provided solute2 label / band. A disabled-nutrient2 run
+    # still writes all-zero retention2_pct traces; without explicit opt-in
+    # we treat those as absent and fall back to the single-row layout so
+    # existing single-solute plots are visually unchanged.
+    have_solute2 = (
+        solute2_label is not None
+        and "retention2_pct" in sc
+        and "leached2_pct" in sc
+        and "degraded2_pct" in sc
+    )
+    if have_solute2:
+        R2 = sc["retention2_pct"]
+        L2 = sc["leached2_pct"]
+        D2 = sc["degraded2_pct"]
+        R2_final = float(R2[-tail:].mean())
+        L2_final = float(L2[-tail:].mean())
+        D2_final = float(D2[-tail:].mean())
 
-    # (a) Retention as a stacked-area mass-conservation breakdown:
-    #     bottom = still in carrot (R), middle = leached into water, top = degraded.
-    #     Three bands sum to 100 % at every t. Lets you tell at a glance
-    #     whether retention loss is mostly Arrhenius or mostly leaching.
-    axes[0].axhspan(target_band[0], target_band[1], color="tab:green", alpha=0.10,
-                     label=f"target band [{target_band[0]:.0f}%,{target_band[1]:.0f}%]")
-    if exp_ref_pct is not None:
-        axes[0].axhline(exp_ref_pct, ls=":", color="k", alpha=0.5,
-                         label=f"exp ref {exp_ref_pct:.0f}%")
-    if have_breakdown:
-        axes[0].fill_between(t, 0, R, color="tab:green", alpha=0.55,
-                              label=f"in carrot ({R_final:.1f}%)")
-        axes[0].fill_between(t, R, R + leached, color="tab:blue", alpha=0.55,
-                              label=f"leached ({leached_final:.1f}%)")
-        axes[0].fill_between(t, R + leached, R + leached + degraded,
-                              color="tab:red", alpha=0.45,
-                              label=f"degraded ({degraded_final:.1f}%)")
-    axes[0].plot(t, R, "-", color="tab:purple", lw=1.5, label="R(t) measured")
-    axes[0].set_xlabel("time [s]")
-    axes[0].set_ylabel("mass fraction of initial [%]")
-    axes[0].set_title(f"{tag}: {solute_label} mass partition")
-    axes[0].set_ylim(0, 102)
-    axes[0].legend(loc="lower left", fontsize=8)
-    axes[0].grid(alpha=0.3)
+    if have_solute2:
+        fig, axes = plt.subplots(2, 3, figsize=(16, 9))
+        _plot_mass_partition(
+            axes[0, 0], t, R, leached, degraded, target_band,
+            exp_ref_pct, solute_label, tag,
+            R_final, leached_final, degraded_final, have_breakdown,
+        )
+        _plot_temperatures(axes[0, 1], t, Tw, Twall, tag)
+        _plot_boiling_vigour(axes[0, 2], t, sc, tag)
 
-    # (b) Temperatures
-    axes[1].plot(t, Tw, "-", color="tab:blue", label="water mean")
-    axes[1].plot(t, Twall, "-", color="tab:red", label="wall inner")
-    axes[1].axhline(100.0, ls=":", color="k", alpha=0.4, label="T_sat")
-    axes[1].set_xlabel("time [s]")
-    axes[1].set_ylabel("T [C]")
-    axes[1].set_title(f"{tag}: temperatures")
-    axes[1].legend()
-    axes[1].grid(alpha=0.3)
-
-    # (c) Bubble count (as proxy for boiling vigour) + peak velocity
-    ax3 = axes[2]
-    if "n_active_bubbles" in sc:
-        ax3.plot(t, sc["n_active_bubbles"], "-", color="tab:green", label="bubbles")
-        ax3.set_ylabel("n active bubbles", color="tab:green")
-        ax3.tick_params(axis="y", labelcolor="tab:green")
-    if "u_max_mps" in sc:
-        ax3_r = ax3.twinx()
-        ax3_r.plot(t, sc["u_max_mps"] * 1000.0, "-",
-                   color="tab:orange", alpha=0.7, label="|u|_max")
-        ax3_r.set_ylabel("|u|_max [mm/s]", color="tab:orange")
-        ax3_r.tick_params(axis="y", labelcolor="tab:orange")
-    ax3.set_xlabel("time [s]")
-    ax3.set_title(f"{tag}: boiling vigour")
-    ax3.grid(alpha=0.3)
+        band2 = target2_band if target2_band is not None else (0.0, 100.0)
+        _plot_mass_partition(
+            axes[1, 0], t, R2, L2, D2, band2,
+            exp2_ref_pct, solute2_label, tag,
+            R2_final, L2_final, D2_final, True,
+        )
+        # Leave the bottom-right two slots empty -- temperatures and boiling
+        # vigour are identical across both solutes so repeating them would
+        # be redundant. Turn axes off for a clean look.
+        axes[1, 1].axis("off")
+        axes[1, 2].axis("off")
+    else:
+        fig, axes1d = plt.subplots(1, 3, figsize=(16, 4.5))
+        _plot_mass_partition(
+            axes1d[0], t, R, leached, degraded, target_band,
+            exp_ref_pct, solute_label, tag,
+            R_final, leached_final, degraded_final, have_breakdown,
+        )
+        _plot_temperatures(axes1d[1], t, Tw, Twall, tag)
+        _plot_boiling_vigour(axes1d[2], t, sc, tag)
 
     fig.suptitle(f"Phase 4 retention validation - {tag}")
     fig.tight_layout()
@@ -130,7 +199,7 @@ def plot_retention_summary(
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
 
-    return {
+    stats = {
         "R_final_pct": R_final,
         "leached_final_pct": leached_final,
         "degraded_final_pct": degraded_final,
@@ -140,7 +209,18 @@ def plot_retention_summary(
         "in_band": target_band[0] <= R_final <= target_band[1],
         "T_water_final_c": float(Tw[-1]),
         "T_wall_final_c": float(Twall[-1]),
+        "have_solute2": have_solute2,
     }
+    if have_solute2:
+        stats.update({
+            "R2_final_pct": R2_final,
+            "leached2_final_pct": L2_final,
+            "degraded2_final_pct": D2_final,
+            "target2_band_lo": band2[0],
+            "target2_band_hi": band2[1],
+            "in_band2": band2[0] <= R2_final <= band2[1],
+        })
+    return stats
 
 
 # -------- Main -----------------------------------------------------------------
@@ -183,6 +263,19 @@ def main() -> int:
                          "line on the plot. Default 84 (beta-carotene Sultana "
                          "reference). Set None-like 0 to hide, or e.g. 55 for "
                          "the vitamin C Sonar 2019 12-min boil reference.")
+    ap.add_argument("--solute2-label", type=str, default=None,
+                    help="Secondary solute name for the dual-solute validation "
+                         "scenario. Leave unset to render a single-solute plot. "
+                         "When set alongside a YAML that enables nutrient2, the "
+                         "figure becomes 2-row with solute 2 on the bottom.")
+    ap.add_argument("--target2-band", type=float, nargs=2, metavar=("LO", "HI"),
+                    default=None,
+                    help="Retention target band (low, high) for the secondary "
+                         "solute. Only consulted when --solute2-label is set.")
+    ap.add_argument("--exp2-ref-pct", type=float, default=0.0,
+                    help="Experimental reference retention %% for the secondary "
+                         "solute. Default 0 (hide). Only consulted when "
+                         "--solute2-label is set.")
     args = ap.parse_args()
 
     cfg = load_scenario(args.config)
@@ -191,6 +284,9 @@ def main() -> int:
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = args.max_bubbles
     cfg.nutrient.enabled = True
+    # nutrient2 is opt-in via the YAML (enabled: true on the nutrient2 block).
+    # The script does not force-enable it, so single-solute YAMLs are
+    # byte-identical to the pre-dual-solute behaviour.
 
     if args.carrot_diameter_mm is not None:
         cfg.carrot.diameter_m = args.carrot_diameter_mm / 1000.0
@@ -250,12 +346,17 @@ def main() -> int:
     # --- Plots + validation summary ---
     plot_path = args.out_dir / f"phase4_retention_{tag}.png"
     exp_ref = args.exp_ref_pct if args.exp_ref_pct > 0 else None
+    exp2_ref = args.exp2_ref_pct if args.exp2_ref_pct > 0 else None
+    target2 = tuple(args.target2_band) if args.target2_band is not None else None
     stats = plot_retention_summary(
         out_h5, plot_path, tag,
         C0=cfg.nutrient.C0_mg_per_kg,
         target_band=tuple(args.target_band),
         solute_label=args.solute_label,
         exp_ref_pct=exp_ref,
+        solute2_label=args.solute2_label,
+        target2_band=target2,
+        exp2_ref_pct=exp2_ref,
     )
 
     print("\n=== Retention summary ===")
@@ -273,6 +374,16 @@ def main() -> int:
               f"(Sherwood surface flux)")
         print(f"  degraded          = {stats['degraded_final_pct']:6.2f} %  "
               f"(Arrhenius + small advection numerical loss)")
+    if stats.get("have_solute2"):
+        print(f"\n  solute 2          = {args.solute2_label}")
+        print(f"  R2({args.duration:.0f} s)        = {stats['R2_final_pct']:.2f} %")
+        exp2_ref_str = f" (exp ref {exp2_ref:.0f} %)" if exp2_ref is not None else ""
+        print(f"  target band 2     = [{stats['target2_band_lo']:.0f} %, "
+              f"{stats['target2_band_hi']:.0f} %]{exp2_ref_str}")
+        status2 = "IN BAND" if stats["in_band2"] else "OUT OF BAND"
+        print(f"  => {status2}")
+        print(f"  leached2          = {stats['leached2_final_pct']:6.2f} %")
+        print(f"  degraded2         = {stats['degraded2_final_pct']:6.2f} %")
     print(f"  T_water final     = {stats['T_water_final_c']:.2f} C")
     print(f"  T_wall inner      = {stats['T_wall_final_c']:.2f} C")
     print(f"  plot              : {plot_path}")

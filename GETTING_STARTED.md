@@ -120,3 +120,73 @@ boiling-sim/
 | 7 | optional | Omniverse Kit migration |
 
 See `multiphysics_boiling_developer_guide.md` for full technical detail.
+
+## Dashboard / Phase 6 deployment
+
+The Phase 6 live dashboard ships as three services wired by
+`docker-compose.yml`:
+
+- **solver** — Python + Warp, produces msgpack snapshots at 30 Hz.
+- **ws-server** — Rust Axum relay (`/stream` WebSocket, TCP ingest on
+  8765, TCP control forward on 8766).
+- **web** — nginx serving the Vite production build; proxies `/stream`
+  to the ws-server container so the browser sees a same-origin URL.
+
+### Local dev (no Docker)
+
+Each service runs standalone in its own terminal:
+
+```powershell
+# Terminal 1 -- Rust relay
+cargo run -p ws-server --release
+
+# Terminal 2 -- Python producer (warm-started default scenario)
+python scripts\run_dashboard.py --config configs\scenarios\default.yaml
+
+# Terminal 3 -- Vite dev server
+cd web
+npm install --include=dev
+npm run dev
+```
+
+Open http://localhost:3000. The dev-mode front-end reads
+`VITE_WS_URL=ws://localhost:8080/stream` from `web/.env.development`
+and connects directly to the Rust relay.
+
+### Containerised (single command)
+
+On a GPU host with the NVIDIA Container Toolkit installed:
+
+```bash
+docker compose up --build
+```
+
+Then open http://localhost:3000 — nginx proxies the WebSocket to the
+ws-server container; the solver hits it over the internal
+`boiling-net` bridge.
+
+The solver container runs `scripts/dashboard_precheck.sh` before
+launching the simulation. If `nvidia-smi` isn't reachable or Warp
+fails to see a CUDA device (the classic WSL2 + Docker silent CPU
+fallback), the container exits with a clear error instead of
+quietly going 100× slower.
+
+### Side-by-side comparison demos
+
+The share-link mechanism encodes scenario parameters + camera pose
+(but not simulation time; see the Phase-6 plan non-goals). To run a
+side-by-side material comparison in the same browser session, open
+two browser windows against the same ws-server:
+
+```
+http://localhost:3000/?hf=30000&mat=steel_304&cd=25&cl=50
+http://localhost:3000/?hf=30000&mat=copper&cd=25&cl=50
+```
+
+Each window drives the same solver via the shared WebSocket; loading
+the second URL kicks a `set_material` control message and triggers a
+rebuild. A few seconds later both windows are streaming the same
+step cadence so you can compare wall temperature and nutrient
+retention between pot materials in real time. This is the intended
+demo pattern for donor/partner walkthroughs.
+

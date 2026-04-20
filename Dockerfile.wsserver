@@ -1,0 +1,50 @@
+# Rust ws-server: two-stage build.
+#
+# Stage 1 compiles the binary against the full workspace.
+# Stage 2 copies only the binary into a minimal runtime with glibc.
+
+# --- build stage -------------------------------------------------------
+FROM rust:1.82-slim-bookworm AS build
+
+WORKDIR /build
+
+# Install build deps for the cuda-kernels crate's build.rs even though
+# we don't use it here -- cargo will still resolve it. Keep minimal.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        pkg-config \
+        libssl-dev \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the whole workspace. (A BuildKit-era optimization would copy
+# Cargo manifests first for layer caching; kept simple here.)
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+
+# Only build what we need -- the cuda-kernels + sim-core crates need a
+# CUDA toolkit that this runtime image doesn't carry, so we target the
+# ws-server bin specifically and drop those crates from the build.
+#
+# We can't easily `cargo build -p ws-server --release` without also
+# pulling in the workspace's cudarc/PyO3 deps, so we patch the workspace
+# manifest to exclude them in this build stage.
+RUN sed -i 's|"crates/sim-core", ||; s|"crates/cuda-kernels", ||' Cargo.toml \
+    && cargo build --release --bin ws-server \
+    && strip target/release/ws-server
+
+# --- runtime stage -----------------------------------------------------
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /build/target/release/ws-server /usr/local/bin/ws-server
+
+# 8080 (WS), 8765 (Python ingest), 8766 (Python control). EXPOSE is
+# informational; docker-compose's `expose:` / `ports:` govern visibility.
+EXPOSE 8080 8765 8766
+
+ENV RUST_LOG=info
+ENTRYPOINT ["/usr/local/bin/ws-server"]
