@@ -10,7 +10,6 @@ Produces:
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import pathlib
 import sys
@@ -25,6 +24,7 @@ import numpy as np  # noqa: E402
 from scipy.integrate import solve_ivp  # noqa: E402
 
 from boilingsim.config import ScenarioConfig, load_scenario  # noqa: E402
+from boilingsim.json_hash_comments import loads_json_with_hash_comments  # noqa: E402
 from boilingsim.pipeline import Simulation  # noqa: E402
 
 
@@ -46,7 +46,9 @@ def lumped_capacitance_ode(cfg: ScenarioConfig) -> dict:
     dict with params, time grid, T(t), and time-to-95C.
     """
     # Load material properties (we don't want the GPU-side MaterialProps here).
-    materials = json.loads((ROOT / "data" / "materials.json").read_text())
+    materials = loads_json_with_hash_comments(
+        (ROOT / "data" / "materials.json").read_text(encoding="utf-8")
+    )
     water = materials["water"]
     pot = materials[cfg.pot.material]
 

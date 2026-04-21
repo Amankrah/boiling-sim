@@ -18,7 +18,6 @@ Boundary conditions implemented here:
 
 from __future__ import annotations
 
-import json
 import pathlib
 from dataclasses import dataclass
 
@@ -26,6 +25,7 @@ import numpy as np
 import warp as wp
 
 from .config import ScenarioConfig
+from .json_hash_comments import loads_json_with_hash_comments
 from .geometry import (
     MAT_AIR,
     MAT_CARROT,
@@ -67,7 +67,9 @@ class MaterialProps:
             materials_path = (
                 pathlib.Path(__file__).resolve().parents[2] / "data" / "materials.json"
             )
-        data = json.loads(pathlib.Path(materials_path).read_text())
+        data = loads_json_with_hash_comments(
+            pathlib.Path(materials_path).read_text(encoding="utf-8")
+        )
 
         water = data["water"]
         pot = data[cfg.pot.material]

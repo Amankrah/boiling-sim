@@ -1,14 +1,14 @@
 {
   "water": {
-    "rho_ref": 997.0,
-    "c_p": 4186.0,
-    "k": 0.606,
-    "mu": 0.00089,
-    "sigma": 0.0589,
-    "beta": 0.000207,
-    "T_sat": 373.15,
-    "h_lv": 2.257e6,
-    "rho_vapor": 0.598,
+    "rho_ref": 997.0,  // reference liquid density (~25 °C)
+    "c_p": 4186.0,  // specific heat at constant pressure
+    "k": 0.606,  // thermal conductivity
+    "mu": 0.00089,  // dynamic viscosity
+    "sigma": 0.0589,  // liquid–vapor surface tension
+    "beta": 0.000207,  // thermal expansion (buoyancy)
+    "T_sat": 373.15,  // saturation temperature at 1 atm (boiling point)
+    "h_lv": 2.257e6,  // latent heat of vaporization
+    "rho_vapor": 0.598,  // saturated vapor density
     "_units": {
       "rho_ref": "kg/m3 at 25C",
       "c_p": "J/(kg*K)",
@@ -22,9 +22,9 @@
     }
   },
   "steel_304": {
-    "rho": 8000.0,
-    "c_p": 500.0,
-    "k": 16.2,
+    "rho": 8000.0,  // mass density
+    "c_p": 500.0,  // specific heat
+    "k": 16.2,  // thermal conductivity
     "_units": {
       "rho": "kg/m3",
       "c_p": "J/(kg*K)",
@@ -32,29 +32,29 @@
     }
   },
   "cast_iron": {
-    "rho": 7200.0,
-    "c_p": 460.0,
-    "k": 55.0
+    "rho": 7200.0,  // mass density
+    "c_p": 460.0,  // specific heat
+    "k": 55.0  // thermal conductivity
   },
   "aluminum": {
-    "rho": 2700.0,
-    "c_p": 900.0,
-    "k": 237.0
+    "rho": 2700.0,  // mass density
+    "c_p": 900.0,  // specific heat
+    "k": 237.0  // thermal conductivity
   },
   "copper": {
-    "rho": 8960.0,
-    "c_p": 385.0,
-    "k": 401.0
+    "rho": 8960.0,  // mass density
+    "c_p": 385.0,  // specific heat
+    "k": 401.0  // thermal conductivity
   },
   "carrot": {
-    "rho": 1040.0,
-    "c_p": 3900.0,
-    "k": 0.605,
-    "D_beta_carotene": 2.0e-10,
-    "K_partition": 0.3,
-    "initial_C_mg_per_kg": 83.0,
-    "Ea_J_per_mol": 70000.0,
-    "k0_per_s": 2.63e6,
+    "rho": 1040.0,  // mass density
+    "c_p": 3900.0,  // specific heat
+    "k": 0.605,  // thermal conductivity
+    "D_beta_carotene": 2.0e-10,  // beta-carotene diffusion in tissue
+    "K_partition": 0.3,  // partition coefficient
+    "initial_C_mg_per_kg": 83.0,  // initial beta-carotene concentration
+    "Ea_J_per_mol": 70000.0,  // Arrhenius activation energy
+    "k0_per_s": 2.63e6,  // Arrhenius pre-exponential factor
     "_units": {
       "rho": "kg/m3",
       "c_p": "J/(kg*K)",
@@ -67,8 +67,8 @@
     }
   },
   "constants": {
-    "R_gas": 8.314,
-    "g": 9.81,
+    "R_gas": 8.314,  // universal gas constant
+    "g": 9.81,  // gravitational acceleration
     "_units": {
       "R_gas": "J/(mol*K)",
       "g": "m/s2"

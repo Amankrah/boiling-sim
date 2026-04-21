@@ -4,8 +4,9 @@ These tests verify that the core dependencies are installed and functional.
 They do NOT test physics — that begins in Phase 1.
 """
 
-import json
 import pathlib
+
+from boilingsim.json_hash_comments import loads_json_with_hash_comments
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -48,7 +49,7 @@ def test_materials_json_valid():
     """materials.json loads and contains all required materials."""
     path = ROOT / "data" / "materials.json"
     assert path.exists(), f"materials.json not found at {path}"
-    data = json.loads(path.read_text())
+    data = loads_json_with_hash_comments(path.read_text(encoding="utf-8"))
     required = ["water", "steel_304", "cast_iron", "aluminum", "copper", "carrot", "constants"]
     for key in required:
         assert key in data, f"Missing material: {key}"
