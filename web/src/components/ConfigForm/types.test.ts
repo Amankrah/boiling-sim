@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  BETA_CAROTENE_PRESET,
   DEFAULT_DRAFT,
   PRESETS,
+  VITAMIN_C_PRESET,
   draftToScenarioJson,
+  nutrientsToSoluteKey,
+  soluteKeyToNutrients,
 } from "./types";
 
 describe("ConfigForm draftToScenarioJson", () => {
@@ -11,14 +15,27 @@ describe("ConfigForm draftToScenarioJson", () => {
     const j = draftToScenarioJson(DEFAULT_DRAFT);
     // Pydantic ScenarioConfig keys live at the top level...
     for (const k of [
-      "pot", "water", "carrot", "heating", "grid",
-      "solver", "boiling", "nutrient", "nutrient2",
+      "pot", "water", "carrot", "heating", "initial_conditions",
+      "grid", "solver", "boiling", "nutrient", "nutrient2",
       "total_time_s", "output_every_s",
     ]) {
       expect(j).toHaveProperty(k);
     }
     // ...and the form's "simulation" wrapper does NOT leak through.
     expect(j).not.toHaveProperty("simulation");
+  });
+
+  it("forwards initial_conditions to the top-level payload", () => {
+    const draft = structuredClone(DEFAULT_DRAFT);
+    draft.initial_conditions.mode = "preheat";
+    draft.initial_conditions.preheat_water_c = 90.0;
+    const j = draftToScenarioJson(draft) as Record<string, Record<string, unknown>>;
+    expect(j.initial_conditions.mode).toBe("preheat");
+    expect(j.initial_conditions.preheat_water_c).toBe(90.0);
+  });
+
+  it("default draft initial_conditions is cold", () => {
+    expect(DEFAULT_DRAFT.initial_conditions.mode).toBe("cold");
   });
 
   it("carries simulation.total_time_s to the top-level Pydantic key", () => {
@@ -76,5 +93,34 @@ describe("ConfigForm presets", () => {
     const b = PRESETS.default.draft();
     a.pot.material = "copper";
     expect(b.pot.material).toBe("steel_304");
+  });
+});
+
+describe("ConfigForm solute preset plumbing", () => {
+  it("soluteKeyToNutrients('off') disables both slots", () => {
+    const { nutrient, nutrient2 } = soluteKeyToNutrients("off");
+    expect(nutrient.enabled).toBe(false);
+    expect(nutrient2.enabled).toBe(false);
+  });
+
+  it("soluteKeyToNutrients('beta_carotene') matches the canonical preset", () => {
+    const { nutrient, nutrient2 } = soluteKeyToNutrients("beta_carotene");
+    expect(nutrient.enabled).toBe(true);
+    expect(nutrient.K_partition).toBeCloseTo(BETA_CAROTENE_PRESET.K_partition);
+    expect(nutrient2.enabled).toBe(false);
+  });
+
+  it("soluteKeyToNutrients('both') enables β-carotene + vitamin C", () => {
+    const { nutrient, nutrient2 } = soluteKeyToNutrients("both");
+    expect(nutrient.K_partition).toBeCloseTo(BETA_CAROTENE_PRESET.K_partition);
+    expect(nutrient2.enabled).toBe(true);
+    expect(nutrient2.K_partition).toBeCloseTo(VITAMIN_C_PRESET.K_partition);
+  });
+
+  it("nutrientsToSoluteKey round-trips every preset", () => {
+    for (const key of ["off", "beta_carotene", "vitamin_c", "both"] as const) {
+      const { nutrient, nutrient2 } = soluteKeyToNutrients(key);
+      expect(nutrientsToSoluteKey(nutrient, nutrient2)).toBe(key);
+    }
   });
 });

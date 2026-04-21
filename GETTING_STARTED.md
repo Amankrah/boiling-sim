@@ -1,4 +1,65 @@
-# Getting Started — Windows Native Setup
+# Getting Started
+
+The **primary** walkthrough below targets **Windows-native** development on the Lambda Vector workstation (no WSL2 required). If you work on **native Ubuntu** (including the same machine with Linux installed, or Lambda’s Jammy image with `archive.lambdalabs.com` enabled), use **[Native Ubuntu / Lambda (bash)](#native-ubuntu--lambda-bash)** first, then pick up verification steps that apply to both OSes.
+
+## Native Ubuntu / Lambda (bash)
+
+Use this path when `nvcc` comes from **`nvidia-cuda-toolkit`** / **`nvidia-cuda-dev`** (Lambda or Ubuntu repos). Those stacks often report **CUDA 12.8** (or another 12.x), which is **compatible** with this project; documentation elsewhere may still say “12.6” as the reference baseline.
+
+### Check the compiler (not PowerShell syntax)
+
+In **bash**, verify:
+
+```bash
+nvcc --version
+# Example: Cuda compilation tools, release 12.8, V12.8.93
+```
+
+**Common mistake:** `echo $env:CUDA_PATH` is **PowerShell**. In bash it does not read `CUDA_PATH`. Use:
+
+```bash
+echo "${CUDA_PATH:-<unset>}"
+```
+
+Seeing **`<unset>`** here is **normal** for apt-based CUDA: nothing is wrong. If `which nvcc` works (often `/usr/bin/nvcc`), Python/Warp and the setup script are fine. You only need `CUDA_PATH` if a tool explicitly requires it (Windows builds always should set it; on Linux it is optional).
+
+### Rust `cuda-kernels` (Linux library path)
+
+`crates/cuda-kernels/build.rs` looks for CUDA libraries in this order: **`CUDA_PATH/lib64`** if set, else **`/usr/local/cuda/lib64`**, else **`/usr/lib/cuda/lib64`** (typical for `nvidia-cuda-dev`). So an unset `CUDA_PATH` is usually fine.
+
+If **`cargo build -p cuda-kernels`** still cannot find `libcudart`, install the dev packages or point the build at your toolkit root:
+
+```bash
+export CUDA_PATH=/usr/lib/cuda   # or wherever `dpkg -L nvidia-cuda-dev` puts libcudart
+```
+
+As a last resort on Ubuntu:
+
+```bash
+sudo mkdir -p /usr/local && sudo ln -sfn /usr/lib/cuda /usr/local/cuda
+```
+
+### Finish environment setup
+
+From your clone:
+
+```bash
+bash scripts/setup_wsl_env.sh
+```
+
+The script **does not** install NVIDIA’s separate 12.6 meta-package if **`nvcc` already reports CUDA 12.x or newer** (so it will not fight Lambda’s 12.8). Then:
+
+```bash
+source .venv/bin/activate
+uv pip install -e ".[dev]"
+pytest python/tests/
+cargo build --release
+cargo test --release -p cuda-kernels
+```
+
+---
+
+## Windows Native Setup
 
 This project is set up for **Windows-native development** on the Lambda Vector workstation. WSL2 is not required.
 
@@ -134,7 +195,9 @@ The Phase 6 live dashboard ships as three services wired by
 
 ### Local dev (no Docker)
 
-Each service runs standalone in its own terminal:
+Each service runs standalone in its own terminal. Use the **repository root** as the working directory (there is no `backend/` folder).
+
+**Windows (PowerShell):**
 
 ```powershell
 # Terminal 1 -- Rust relay
@@ -149,9 +212,26 @@ npm install --include=dev
 npm run dev
 ```
 
-Open http://localhost:3000. The dev-mode front-end reads
-`VITE_WS_URL=ws://localhost:8080/stream` from `web/.env.development`
-and connects directly to the Rust relay.
+**Linux / macOS (bash):** use **`/`** in paths. Backslashes merge path segments (`scripts\run_...` becomes `scriptsrun_...`).
+
+```bash
+# Terminal 1
+cargo run -p ws-server --release
+
+# Terminal 2 (venv active: source .venv/bin/activate)
+python scripts/run_dashboard.py --config configs/scenarios/default.yaml
+
+# Terminal 3
+cd web
+npm install --include=dev
+npm run dev
+```
+
+Open http://localhost:3000 (or the Vite “Network” URL). In dev, the UI
+connects to **`ws://<same-host>:8080/stream`** automatically so it matches
+`cargo run -p ws-server`, and **`/api/*`** (Results tab artefacts) is proxied
+to the same relay on port 8080. Override WebSocket URL with `VITE_WS_URL` in
+`web/.env.development` if needed.
 
 ### Containerised (single command)
 

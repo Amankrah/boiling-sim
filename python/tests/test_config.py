@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from boilingsim.config import (
     CarrotConfig,
+    InitialConditionsConfig,
     PotConfig,
     ScenarioConfig,
     WaterConfig,
@@ -67,3 +68,21 @@ def test_yaml_roundtrip(tmp_path: pathlib.Path):
     path.write_text(yaml.safe_dump(original.model_dump()))
     roundtrip = load_scenario(path)
     assert roundtrip.model_dump() == original.model_dump()
+
+
+def test_initial_conditions_default_is_cold():
+    cfg = ScenarioConfig()
+    assert cfg.initial_conditions.mode == "cold"
+    assert cfg.initial_conditions.preheat_water_c == 95.0
+    assert cfg.initial_conditions.preheat_wall_c == 100.0
+    assert cfg.initial_conditions.preheat_carrot_c == 20.0
+
+
+def test_initial_conditions_invalid_mode_rejected():
+    with pytest.raises(ValidationError):
+        InitialConditionsConfig(mode="sideways")
+
+
+def test_initial_conditions_preheat_range_enforced():
+    with pytest.raises(ValidationError):
+        InitialConditionsConfig(mode="preheat", preheat_water_c=200.0)

@@ -30,12 +30,17 @@ import {
 } from "./share";
 import type { CameraPose } from "./components/BoilingScene";
 
+// Dev: Vite serves the UI on :3000 but ws-server listens on :8080. Production:
+// nginx proxies /stream on the same host as the static files.
 const WS_URL = (() => {
-  const fromEnv = (import.meta as unknown as { env?: Record<string, string> }).env
-    ?.VITE_WS_URL;
+  const fromEnv = import.meta.env.VITE_WS_URL;
   if (fromEnv) return fromEnv;
   if (typeof window === "undefined") return "ws://localhost:8080/stream";
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  if (import.meta.env.DEV) {
+    const host = window.location.hostname;
+    return `${proto}//${host}:8080/stream`;
+  }
   return `${proto}//${window.location.host}/stream`;
 })();
 

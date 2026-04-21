@@ -2,7 +2,7 @@
 #
 # Stage 1 builds the Vite bundle with Node 20.
 # Stage 2 serves it via nginx. The nginx config (nginx.conf, copied in)
-# proxies /stream to ws-server:8080, so the browser sees a same-origin
+# proxies /stream and /api to ws-server:8080, so the browser sees same-origin
 # WebSocket URL and avoids CORS/mixed-content headaches.
 
 # --- build stage -------------------------------------------------------

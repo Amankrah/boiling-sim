@@ -558,3 +558,79 @@ New [python/boilingsim/run_writer.py](../python/boilingsim/run_writer.py) (~240 
 The dashboard is now data-forward: water temperature is honest, every scenario knob is reachable from the browser, every completed run writes three downloadable artefacts, and the Results page renders a Phase-4-style report — headline + band pill + exit-check + six charts + trajectory table + parameters echo — without any manual analysis step. Schema v3 stays locked across three languages (Rust + Python + TypeScript) via the CHANGELOG comment at the top of [snapshot.rs](../crates/ws-server/src/snapshot.rs) and the 30-test Rust + 128-test Python + 29-test vitest suites.
 
 Phase 4 validated the physics; Phase 6 shipped the live viewer; Phase 6.5 made it readable; Phase 6.6 made it configurable and exportable. The next demo — steel vs. copper head-to-head, or vitamin C vs. β-carotene at matched geometry — is now a Configuration-page preset choice + an Apply click + a Results-page download, not a YAML edit + a container restart + a matplotlib script.
+
+---
+
+## Phase 6.7 extension — scientific-safety audit of the config surface
+
+### Motivation
+
+The Phase 6.6 exit check celebrated "every Pydantic field user-settable from the browser." In practice that was the wrong target: surfacing solver tolerances, Rohsenow coefficients, Arrhenius `E_a` / `k0`, partition coefficients, and molecular diffusivities as editable form fields invites misconfiguration that invalidates the Phase-2/3/4 validation story. The form also had a latent bug where `water.initial_temp_c` was silently overridden on every rebuild by the dashboard's hard-coded warm-start CLI defaults (95 °C water / 100 °C wall / 20 °C carrot), so a user who typed `T = 20 °C` and clicked Apply still saw the sim start at 95 °C.
+
+This extension is a framing correction, not a new feature: user-editable = experiment variables only; literature-pinned physics lives in YAML presets.
+
+### Warm-start becomes a first-class config field
+
+Added `InitialConditionsConfig` to [python/boilingsim/config.py](../python/boilingsim/config.py):
+
+```python
+class InitialConditionsConfig(BaseModel):
+    mode: Literal["cold", "preheat"] = "cold"
+    preheat_water_c: float = Field(95.0, ge=0.0, le=105.0)
+    preheat_wall_c:  float = Field(100.0, ge=0.0, le=120.0)
+    preheat_carrot_c: float = Field(20.0, ge=0.0, le=100.0)
+```
+
+Mounted on `ScenarioConfig`. Default `mode = "cold"` so the form honours `water.initial_temp_c` end-to-end.
+
+In [scripts/run_dashboard.py](../scripts/run_dashboard.py), `build_warm_started_sim(cfg, warm_water_c=…, warm_wall_c=…, warm_carrot_c=…)` is replaced by `build_simulation(cfg, device)` which branches on `cfg.initial_conditions.mode`. The three `--warm-start-*` CLI flags are removed (cold-start was never CLI-reachable before; preheat now travels in the config payload). `geometry.initialize_temperature` at dx-level already honours `cfg.water.initial_temp_c`; the preheat branch applies the post-construction override via the same numpy path as the old CLI.
+
+### Parameter tiers (slimmed UI)
+
+**Tier 1 — experiment knobs (visible, plain-language labels):**
+
+- Simulation duration
+- Pot material, diameter, height
+- Water fill fraction, initial temperature
+- Carrot diameter, length, z-position
+- Heating flux, ambient
+- **Initial conditions** — cold / preheat toggle (preheat surfaces three extra T setpoints)
+- **Solute preset** — off / β-carotene / vitamin C / both — replaces the 9-field primary + 5-field secondary Nutrient sections
+
+**Tier 2 — Advanced (collapsed, labelled "change only if you know why"):**
+
+- Pot wall / base thickness
+- Grid dx, carrot mesh resolution
+- HDF5 output interval
+
+**Tier 3 — removed from UI (YAML-only):**
+
+- Entire `SolverConfig` (10 knobs: CFL, tolerances, pressure / diffusion max-iter, `h_conv_outer`, `h_evap_free_surface`, `f_bulk_evap`, `use_implicit_conduction`)
+- Entire `BoilingConfig` (8 knobs: ONB ΔT, contact angle, pool size, initial radius, nucleation probability, `C_sf` / `Pr_n` Rohsenow)
+- All `NutrientConfig` kinetic constants (`E_a`, `k0`, `D_eff`, `K_partition`, `C_water_sat`, `nu_water`, `D_water_molec`) on both slots — driven entirely by the solute dropdown
+- Redundant `carrot.initial_beta_carotene_mg_per_100g` (duplicate of `nutrient.C0_mg_per_kg`)
+
+Power users override physics constants by dropping a YAML under `configs/scenarios/` and launching with `--config path.yaml` — unchanged.
+
+### Solute preset plumbing
+
+Canonical β-carotene and vitamin-C parameter dicts live once per side ([scripts/run_dashboard.py `NUTRIENT_PRESETS`](../scripts/run_dashboard.py), [web/src/components/ConfigForm/types.ts `BETA_CAROTENE_PRESET` / `VITAMIN_C_PRESET`](../web/src/components/ConfigForm/types.ts)). The TS side exposes `soluteKeyToNutrients(key)` → `{ nutrient, nutrient2 }` and its inverse `nutrientsToSoluteKey(n, n2)`, so the dropdown round-trips against an existing draft. The wire payload is unchanged: both `nutrient` and `nutrient2` blocks still ride the `set_config` message and the backend still runs Pydantic validation — the UI just stopped offering per-constant edit controls.
+
+### Wire-protocol footprint
+
+**None.** `ScenarioConfig.model_validate` gains one optional field (`initial_conditions`) that defaults cleanly, so every existing YAML and every existing share-link URL continues to validate. No snapshot / control-message schema version bump.
+
+### Acceptance (Phase 6.7)
+
+- [x] **`water.initial_temp_c = 20 °C` actually starts the sim at 20 °C** — regression test `test_build_simulation_cold_start_honours_initial_temp` in [python/tests/test_run_dashboard_controls.py](../python/tests/test_run_dashboard_controls.py) builds a sim and asserts `mean(T[MAT_FLUID]) == 293.15 K` within 0.1 K. Companion `test_build_simulation_preheat_overrides_initial_temp` covers the preheat branch at 95 °C.
+- [x] **Physics constants never reach the UI edit path** — [web/src/components/ConfigForm/ConfigForm.tsx](../web/src/components/ConfigForm/ConfigForm.tsx) no longer imports `Checkbox` for the boiling/solver enables; Slider is retained only for water fill. Solver / Boiling / Nutrient sections deleted entirely.
+- [x] **Solute preset round-trips** — new vitest cases in [web/src/components/ConfigForm/types.test.ts](../web/src/components/ConfigForm/types.test.ts) verify `soluteKeyToNutrients("both") == (β-carotene, vitamin C)` and `nutrientsToSoluteKey` inverts every preset.
+- [x] **Full suite green** — `pytest -q` → 134 / 134 (5 new tests: 3 config, 2 build_simulation); `npm test` → 31 / 31 relevant (6 new vitest cases; the pre-existing `WaterVolume.test.ts` CJS-loader failure is unrelated and reproduces on `main`).
+- [x] **Frontend builds clean** — `tsc -b && vite build` green after removing ~350 lines of field-level JSX.
+
+### Supersedes
+
+Line 222 ("driver with warm-start") — the driver now respects `cfg.initial_conditions.mode`; the three `--warm-start-*` CLI flags are removed.
+
+Lines 431, 518, 541 of the Phase 6.6 narrative ("every Pydantic field user-settable" / "every field editable from the browser") — intentionally no longer true. Experiment variables remain fully browser-editable; physics knobs moved back to YAML. The Phase 2/3/4 validation targets (steel Rohsenow ratio 0.97–1.01×, R(600 s, 25 mm) = 88.7 %) are now guarded against casual UI-side mis-tuning.
+

@@ -52,6 +52,29 @@ class HeatingConfig(BaseModel):
     ambient_temp_c: float = Field(22.0, ge=-50.0, le=100.0)
 
 
+class InitialConditionsConfig(BaseModel):
+    """How the grid temperature field is seeded at t=0.
+
+    ``cold`` (default) honours ``water.initial_temp_c`` end-to-end: water,
+    pot wall and carrot all start at the configured water temperature
+    (the carrot is assumed to have equilibrated with the water at load
+    time; pot wall equilibrates too since the stove hasn't fired yet).
+    Air stays at ``heating.ambient_temp_c``.
+
+    ``preheat`` overrides the grid T field after construction with the
+    ``preheat_*_c`` values. Intended for benchmark scripts that want to
+    skip the 5-10 min warming transient and start the interesting physics
+    (nucleate boiling, nutrient degradation) immediately. Phase-3 and
+    Phase-4 benchmarks use this path with the historical 95 / 100 / 20 °C
+    defaults.
+    """
+
+    mode: Literal["cold", "preheat"] = "cold"
+    preheat_water_c: float = Field(95.0, ge=0.0, le=105.0)
+    preheat_wall_c: float = Field(100.0, ge=0.0, le=120.0)
+    preheat_carrot_c: float = Field(20.0, ge=0.0, le=100.0)
+
+
 class GridConfig(BaseModel):
     dx_m: float = Field(0.001, gt=0.0)
     carrot_mesh_resolution: int = Field(40, gt=0)
@@ -225,6 +248,9 @@ class ScenarioConfig(BaseModel):
     water: WaterConfig = Field(default_factory=WaterConfig)
     carrot: CarrotConfig = Field(default_factory=CarrotConfig)
     heating: HeatingConfig = Field(default_factory=HeatingConfig)
+    initial_conditions: InitialConditionsConfig = Field(
+        default_factory=InitialConditionsConfig,
+    )
     grid: GridConfig = Field(default_factory=GridConfig)
     solver: SolverConfig = Field(default_factory=SolverConfig)
     boiling: BoilingConfig = Field(default_factory=BoilingConfig)

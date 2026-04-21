@@ -197,6 +197,12 @@ def main() -> int:
     ap.add_argument("--warm-start-wall-c", type=float, default=100.0)
     ap.add_argument("--out-dir", type=pathlib.Path, default=ROOT / "benchmarks")
     ap.add_argument("--device", default="cuda:0")
+    ap.add_argument(
+        "--tag", type=str, default=None,
+        help="Override the HDF5/PNG stem. Default: pot material name "
+             "(phase3_boiling_<material>). Use this when running a q-sweep so "
+             "successive runs don't overwrite each other, e.g. --tag q_sweep_q40.",
+    )
     args = ap.parse_args()
 
     cfg = load_scenario(args.config)
@@ -206,7 +212,8 @@ def main() -> int:
     cfg.boiling.max_bubbles = args.max_bubbles
 
     material = cfg.pot.material
-    print(f"=== Phase 3 boiling validation: {material} ===")
+    stem = args.tag if args.tag else material
+    print(f"=== Phase 3 boiling validation: {stem} ===")
     print(f"  config       : {args.config}")
     print(f"  duration     : {args.duration:.1f} s")
     print(f"  dx           : {args.dx_mm:.2f} mm")
@@ -233,7 +240,7 @@ def main() -> int:
     sim.grid.T.assign(T_np)
 
     print(f"\n  === running {args.duration:.0f} s of boiling ===")
-    out_h5 = args.out_dir / f"phase3_boiling_{material}.h5"
+    out_h5 = args.out_dir / f"phase3_boiling_{stem}.h5"
     t0 = time.perf_counter()
     scalars = sim.run(
         total_time_s=args.duration,
@@ -247,9 +254,9 @@ def main() -> int:
           f"{wall/args.duration:.2f} s/sim-s")
 
     # --- Validation plots + summary ---
-    plot_path = args.out_dir / f"phase3_boiling_{material}.png"
+    plot_path = args.out_dir / f"phase3_boiling_{stem}.png"
     stats = plot_summary(
-        out_h5, plot_path, material,
+        out_h5, plot_path, stem,
         C_sf=cfg.boiling.C_sf_rohsenow,
         Pr_n=cfg.boiling.Pr_n_rohsenow,
         q_base_w_per_m2=cfg.heating.base_heat_flux_w_per_m2,

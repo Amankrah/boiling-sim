@@ -52,7 +52,7 @@ boiling-sim/
 |-----------|---------|
 | NVIDIA GPU | Ada Lovelace or newer (tested on RTX 6000 Ada 48 GB) |
 | NVIDIA Driver | 560+ |
-| CUDA Toolkit | 12.6 |
+| CUDA Toolkit | 12.6+ (12.6 baseline; 12.8 from Ubuntu/Lambda apt is OK) |
 | Python | 3.11 (required by Warp, must be < 3.13) |
 | Rust | 1.75+ |
 | Node.js | 20+ |
@@ -60,31 +60,78 @@ boiling-sim/
 
 ## Quick start
 
-### 1. Install CUDA Toolkit 12.6
+### Windows (native)
 
-Download from [NVIDIA CUDA 12.6 Archive](https://developer.nvidia.com/cuda-12-6-0-download-archive) and run the installer (Express install recommended).
+1. **Install CUDA Toolkit 12.6** — Download from the [NVIDIA CUDA 12.6 Archive](https://developer.nvidia.com/cuda-12-6-0-download-archive) and run the installer (Express install is fine).
 
-### 2. Run the setup script
+2. **Run the setup script** from the repo root in PowerShell:
 
-```powershell
-cd boiling-sim
-.\scripts\setup_windows_env.ps1
-```
+   ```powershell
+   cd boiling-sim
+   .\scripts\setup_windows_env.ps1
+   ```
 
-This will verify your toolchain, create a Python 3.11 virtualenv, install all dependencies, and compile the Rust crates.
+   This checks the toolchain, creates a Python 3.11 virtualenv, and installs Python dependencies. For day-to-day work in a new shell, you can dot-source `.\scripts\activate_dev_env.ps1` so MSVC, CUDA, and the venv are on `PATH`.
 
-### 3. Activate the environment
+3. **Activate the environment**
 
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
+   ```powershell
+   .\.venv\Scripts\Activate.ps1
+   ```
 
-### 4. Verify the installation
+4. **Install the `boilingsim` package (editable)** so the `boiling-sim-scenario` CLI is available:
 
-```powershell
-pytest python\tests\
-cargo test --release -p cuda-kernels
-```
+   ```powershell
+   uv pip install -e ".[dev]"
+   ```
+
+5. **Verify**
+
+   ```powershell
+   pytest python\tests\
+   cargo test --release -p cuda-kernels
+   ```
+
+### Linux / WSL2 (Ubuntu)
+
+Use this when developing inside **WSL2** or **native Ubuntu** with an NVIDIA GPU visible in the distro (`nvidia-smi` works) and a **560+** driver on the host (for WSL2: install the driver on Windows only).
+
+1. From your clone (any path), run:
+
+   ```bash
+   cd /path/to/boiling-sim
+   bash scripts/setup_wsl_env.sh
+   ```
+
+   The script updates packages, runs `apt-get --fix-broken install` to clear broken/partial installs, installs build dependencies, then installs **CUDA 12.6** from NVIDIA’s **WSL Ubuntu** repo **only if** `nvcc` is missing or older than CUDA 12 (for example, **Lambda’s `nvidia-cuda-toolkit` 12.8** is detected and left alone). It then installs **uv**, a Python 3.11 **`.venv`**, Rust tooling, and Node.js 20.
+
+2. **If `apt` fails with unmet dependencies** (common on Ubuntu 22.04 when security updates are pending), repair and retry:
+
+   ```bash
+   sudo apt update
+   sudo apt --fix-broken install
+   ```
+
+   Accept the proposed upgrades (for example `libssl3`, `libcurl4`, `libfreerdp2-2`). Then run `bash scripts/setup_wsl_env.sh` again.
+
+3. **Benign noise during CUDA install** — You may see `head: cannot open '/etc/ssl/certs/java/cacerts'` while `ca-certificates-java` runs; the postinst usually still completes and registers certificates.
+
+4. **`apt autoremove` suggestions** — After NVIDIA driver changes, apt may list old `libnvidia-*` packages as “no longer required.” Review before running `sudo apt autoremove` so you do not remove packages you still need for graphics or compute.
+
+5. **Activate and install the package**
+
+   ```bash
+   source .venv/bin/activate
+   uv pip install -e ".[dev]"
+   ```
+
+6. **Verify**
+
+   ```bash
+   pytest python/tests/
+   cargo test --release -p cuda-kernels
+   cargo build --release
+   ```
 
 ## Usage
 
@@ -94,9 +141,17 @@ cargo test --release -p cuda-kernels
 boiling-sim-scenario configs/scenarios/default.yaml
 ```
 
+```bash
+boiling-sim-scenario configs/scenarios/default.yaml
+```
+
 ### Run individual scripts
 
 ```powershell
+python scripts/run_heating.py
+```
+
+```bash
 python scripts/run_heating.py
 ```
 

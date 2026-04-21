@@ -190,3 +190,37 @@ def test_apply_control_live_set_heat_flux_mutates(run_dashboard_mod, base_cfg):
     msg = {"type": "set_heat_flux", "value": 42000.0}
     assert run_dashboard_mod.apply_control_live(sim, msg) is False
     assert sim.cfg.heating.base_heat_flux_w_per_m2 == 42000.0
+
+
+# ---------------------------------------------------------------------------
+# build_simulation honours cfg.initial_conditions (regression guard for the
+# warm-start override bug: user-provided water.initial_temp_c used to be
+# silently replaced by hard-coded CLI defaults every rebuild).
+# ---------------------------------------------------------------------------
+
+
+def _water_mean_c(sim) -> float:
+    import numpy as np
+
+    from boilingsim.geometry import MAT_FLUID
+
+    T = sim.grid.T.numpy()
+    mat = sim.grid.mat.numpy()
+    return float(np.mean(T[mat == MAT_FLUID]) - 273.15)
+
+
+def test_build_simulation_cold_start_honours_initial_temp(run_dashboard_mod, base_cfg):
+    base_cfg.water.initial_temp_c = 20.0
+    base_cfg.initial_conditions.mode = "cold"
+    base_cfg.grid.dx_m = 0.004  # coarsest dev grid for a fast build
+    sim = run_dashboard_mod.build_simulation(base_cfg, device="cuda:0")
+    assert _water_mean_c(sim) == pytest.approx(20.0, abs=0.1)
+
+
+def test_build_simulation_preheat_overrides_initial_temp(run_dashboard_mod, base_cfg):
+    base_cfg.water.initial_temp_c = 20.0
+    base_cfg.initial_conditions.mode = "preheat"
+    base_cfg.initial_conditions.preheat_water_c = 95.0
+    base_cfg.grid.dx_m = 0.004
+    sim = run_dashboard_mod.build_simulation(base_cfg, device="cuda:0")
+    assert _water_mean_c(sim) == pytest.approx(95.0, abs=0.1)

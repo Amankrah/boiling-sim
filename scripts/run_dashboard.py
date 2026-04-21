@@ -103,21 +103,25 @@ def apply_nutrient_preset(cfg, key: str) -> bool:
     return True
 
 
-def build_warm_started_sim(
-    cfg,
-    *,
-    warm_water_c: float,
-    warm_wall_c: float,
-    warm_carrot_c: float,
-    device: str,
-) -> Simulation:
+def build_simulation(cfg, *, device: str) -> Simulation:
+    """Construct a Simulation honouring ``cfg.initial_conditions``.
+
+    ``mode == "cold"`` returns the bare Simulation; ``geometry.py`` already
+    seeds the T field from ``cfg.water.initial_temp_c`` and
+    ``cfg.heating.ambient_temp_c``. ``mode == "preheat"`` additionally
+    overwrites water / pot-wall / carrot cells with the preheat setpoints
+    — the historical warm-start path used by benchmark scripts to skip
+    the warming transient.
+    """
     sim = Simulation(cfg, device=device)
-    T = sim.grid.T.numpy()
-    mat = sim.grid.mat.numpy()
-    T[mat == MAT_FLUID] = warm_water_c + 273.15
-    T[mat == MAT_POT_WALL] = warm_wall_c + 273.15
-    T[mat == MAT_CARROT] = warm_carrot_c + 273.15
-    sim.grid.T.assign(T)
+    ic = cfg.initial_conditions
+    if ic.mode == "preheat":
+        T = sim.grid.T.numpy()
+        mat = sim.grid.mat.numpy()
+        T[mat == MAT_FLUID] = ic.preheat_water_c + 273.15
+        T[mat == MAT_POT_WALL] = ic.preheat_wall_c + 273.15
+        T[mat == MAT_CARROT] = ic.preheat_carrot_c + 273.15
+        sim.grid.T.assign(T)
     return sim
 
 
@@ -202,9 +206,6 @@ def main() -> int:
     ap.add_argument("--max-bubbles", type=int, default=100_000)
     ap.add_argument("--snapshot-hz", type=float, default=30.0,
                     help="Target snapshot cadence. 30 is the dashboard default.")
-    ap.add_argument("--warm-start-water-c", type=float, default=95.0)
-    ap.add_argument("--warm-start-wall-c", type=float, default=100.0)
-    ap.add_argument("--warm-start-carrot-c", type=float, default=20.0)
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--ingest-host", default=DEFAULT_INGEST_ADDR[0])
     ap.add_argument("--ingest-port", type=int, default=DEFAULT_INGEST_ADDR[1])
@@ -239,13 +240,7 @@ def main() -> int:
     consumer = ControlConsumer(addr=(args.control_host, args.control_port))
     consumer.start()
 
-    sim = build_warm_started_sim(
-        cfg,
-        warm_water_c=args.warm_start_water_c,
-        warm_wall_c=args.warm_start_wall_c,
-        warm_carrot_c=args.warm_start_carrot_c,
-        device=args.device,
-    )
+    sim = build_simulation(cfg, device=args.device)
 
     snapshot_interval_s = 1.0 / max(args.snapshot_hz, 0.1)
     last_snapshot_at: float = -1.0
@@ -350,13 +345,7 @@ def main() -> int:
                         continue
                     cfg = new_cfg
                     last_error = ""
-                sim = build_warm_started_sim(
-                    cfg,
-                    warm_water_c=args.warm_start_water_c,
-                    warm_wall_c=args.warm_start_wall_c,
-                    warm_carrot_c=args.warm_start_carrot_c,
-                    device=args.device,
-                )
+                sim = build_simulation(cfg, device=args.device)
                 step_count = 0
                 last_snapshot_at = -1.0
                 run_id, history, run_start_wall, is_complete = reset_run(sim)

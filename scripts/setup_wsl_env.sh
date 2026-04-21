@@ -7,10 +7,12 @@
 #   2. Creating C:\Users\<you>\.wslconfig with memory=240GB
 #   3. Running 'wsl --shutdown' and relaunching Ubuntu
 #
-# Usage:  cd ~/boiling-sim && bash scripts/setup_wsl_env.sh
+# Usage:  cd /path/to/boiling-sim && bash scripts/setup_wsl_env.sh
 # ============================================================================
 
 set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 info()  { echo -e "\033[0;32m[INFO]\033[0m $*"; }
 warn()  { echo -e "\033[1;33m[WARN]\033[0m $*"; }
@@ -33,14 +35,20 @@ info "Driver version OK (>= 560)."
 # ---- Step 3: System packages ----
 info "Installing system packages..."
 sudo apt update
+info "Repairing broken/partial installs (required before adding build deps)..."
+sudo apt-get --fix-broken install -y
 sudo apt install -y \
     build-essential git curl pkg-config libssl-dev \
     cmake ninja-build python3-dev python3-venv \
     libblas-dev liblapack-dev libhdf5-dev \
     clang lld unzip
 
-# ---- Step 4: CUDA Toolkit 12.6 ----
-if ! nvcc --version 2>/dev/null | grep -q "12.6"; then
+# ---- Step 4: CUDA Toolkit (12.6+; skip if nvcc 12.x or newer already on PATH) ----
+# Lambda / distro packages may ship 12.8 as "nvidia-cuda-toolkit"; do not stack NVIDIA's 12.6 on top.
+if nvcc --version 2>/dev/null | grep -qE 'release 1[2-9]\.|release [2-9][0-9]\.'; then
+    info "CUDA compiler already present; skipping apt CUDA install."
+    nvcc --version | grep release || true
+else
     info "Installing CUDA Toolkit 12.6 (WSL-specific)..."
     cd /tmp
     wget -q https://developer.download.nvidia.com/compute/cuda/repos/wsl-ubuntu/x86_64/cuda-keyring_1.1-1_all.deb
@@ -48,7 +56,7 @@ if ! nvcc --version 2>/dev/null | grep -q "12.6"; then
     rm -f cuda-keyring_1.1-1_all.deb
     sudo apt update
     sudo apt install -y cuda-toolkit-12-6
-    cd ~/boiling-sim
+    cd "$REPO_ROOT"
 
     if ! grep -q 'cuda-12.6' ~/.bashrc; then
         {
@@ -60,8 +68,6 @@ if ! nvcc --version 2>/dev/null | grep -q "12.6"; then
     fi
     export PATH=/usr/local/cuda-12.6/bin:$PATH
     export LD_LIBRARY_PATH=/usr/local/cuda-12.6/lib64:${LD_LIBRARY_PATH:-}
-else
-    info "CUDA 12.6 already installed."
 fi
 
 info "Verifying nvcc..."
@@ -86,7 +92,7 @@ if ! command -v uv &>/dev/null; then
     export PATH="$HOME/.local/bin:$PATH"
 fi
 
-cd ~/boiling-sim
+cd "$REPO_ROOT"
 if [ ! -d .venv ]; then
     info "Creating Python 3.11 venv..."
     uv venv --python 3.11
@@ -126,7 +132,7 @@ else
 fi
 
 # ---- Init git ----
-cd ~/boiling-sim
+cd "$REPO_ROOT"
 if [ ! -d .git ]; then
     git init
 fi

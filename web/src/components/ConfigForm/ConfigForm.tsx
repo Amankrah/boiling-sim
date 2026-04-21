@@ -8,7 +8,6 @@ import { useState } from "react";
 
 import type { ControlMessage, Snapshot } from "../../types/snapshot";
 import { Button } from "../ui/Button";
-import { Checkbox } from "../ui/Checkbox";
 import { NumberInput } from "../ui/NumberInput";
 import { Select } from "../ui/Select";
 import { Slider } from "../ui/Slider";
@@ -19,8 +18,12 @@ import {
   DEFAULT_DRAFT,
   PRESETS,
   draftToScenarioJson,
+  nutrientsToSoluteKey,
+  soluteKeyToNutrients,
+  type InitialConditionsMode,
   type MaterialName,
   type ScenarioDraft,
+  type SoluteKey,
 } from "./types";
 
 interface Props {
@@ -40,6 +43,18 @@ const PRESET_OPTIONS = Object.entries(PRESETS).map(([value, { label }]) => ({
   value,
   label,
 }));
+
+const INITIAL_CONDITIONS_OPTIONS: { value: InitialConditionsMode; label: string }[] = [
+  { value: "cold", label: "Cold start (use water temperature below)" },
+  { value: "preheat", label: "Preheated (skip the 5–10 min warming transient)" },
+];
+
+const SOLUTE_OPTIONS: { value: SoluteKey; label: string }[] = [
+  { value: "off", label: "Off (no nutrient tracking)" },
+  { value: "beta_carotene", label: "β-carotene (lipophilic, degradation-dominated)" },
+  { value: "vitamin_c", label: "Vitamin C (water-soluble, leach-dominated)" },
+  { value: "both", label: "β-carotene + vitamin C (dual solute)" },
+];
 
 export function ConfigForm({ snapshot, sendCommand, onApplied }: Props) {
   const [draft, setDraft] = useState<ScenarioDraft>(() =>
@@ -62,18 +77,26 @@ export function ConfigForm({ snapshot, sendCommand, onApplied }: Props) {
     setDraft((d) => ({ ...d, carrot: { ...d.carrot, ...patch } }));
   const updateHeating = (patch: Partial<ScenarioDraft["heating"]>) =>
     setDraft((d) => ({ ...d, heating: { ...d.heating, ...patch } }));
+  const updateInitialConditions = (
+    patch: Partial<ScenarioDraft["initial_conditions"]>,
+  ) =>
+    setDraft((d) => ({
+      ...d,
+      initial_conditions: { ...d.initial_conditions, ...patch },
+    }));
   const updateGrid = (patch: Partial<ScenarioDraft["grid"]>) =>
     setDraft((d) => ({ ...d, grid: { ...d.grid, ...patch } }));
-  const updateSolver = (patch: Partial<ScenarioDraft["solver"]>) =>
-    setDraft((d) => ({ ...d, solver: { ...d.solver, ...patch } }));
-  const updateBoiling = (patch: Partial<ScenarioDraft["boiling"]>) =>
-    setDraft((d) => ({ ...d, boiling: { ...d.boiling, ...patch } }));
-  const updateNutrient = (patch: Partial<ScenarioDraft["nutrient"]>) =>
-    setDraft((d) => ({ ...d, nutrient: { ...d.nutrient, ...patch } }));
-  const updateNutrient2 = (patch: Partial<ScenarioDraft["nutrient2"]>) =>
-    setDraft((d) => ({ ...d, nutrient2: { ...d.nutrient2, ...patch } }));
   const updateSimulation = (patch: Partial<ScenarioDraft["simulation"]>) =>
     setDraft((d) => ({ ...d, simulation: { ...d.simulation, ...patch } }));
+
+  const handleSoluteChange = (key: SoluteKey) => {
+    const { nutrient, nutrient2 } = soluteKeyToNutrients(key);
+    setDraft((d) => ({ ...d, nutrient, nutrient2 }));
+  };
+  const currentSolute: SoluteKey = nutrientsToSoluteKey(
+    draft.nutrient,
+    draft.nutrient2,
+  );
 
   const handleApply = () => {
     setApplying(true);
@@ -108,10 +131,12 @@ export function ConfigForm({ snapshot, sendCommand, onApplied }: Props) {
         <div>
           <h2>Configuration</h2>
           <p>
-            Edit every scenario field, then click <strong>Apply &amp; Start
-            Run</strong>. The Python producer validates via Pydantic; any
-            rejection shows up at the bottom of this page and the current
-            simulation keeps running.
+            Set the experiment knobs, then click <strong>Apply &amp; Start
+            Run</strong>. Kinetic constants (Arrhenius, Rohsenow, partition
+            coefficients, solver tolerances) load from literature values tied
+            to the chosen material and solute — override them by dropping a
+            YAML into <code>configs/scenarios/</code>. Server-side Pydantic
+            rejections surface at the bottom of this page.
           </p>
         </div>
         <div className="config-form__preset-row">
@@ -126,7 +151,7 @@ export function ConfigForm({ snapshot, sendCommand, onApplied }: Props) {
       </header>
 
       {/* --- Run (prominent first: duration is the most common edit) --- */}
-      <Section title="Simulation" subtitle="duration + sampling">
+      <Section title="Simulation" subtitle="how long to run">
         <FieldRow label="Total time" hint="Stops the run and writes artefacts at this simulated time. 0 = run forever.">
           <NumberInput
             label="t"
@@ -137,18 +162,6 @@ export function ConfigForm({ snapshot, sendCommand, onApplied }: Props) {
             step={10}
             unit="s"
             onCommit={(v) => updateSimulation({ total_time_s: v })}
-          />
-        </FieldRow>
-        <FieldRow label="Output interval" hint="Only used by the offline HDF5 writer; dashboard uses snapshot-Hz independently.">
-          <NumberInput
-            label="dt"
-            ariaLabel="HDF5 output interval in seconds"
-            value={draft.simulation.output_every_s}
-            min={0.01}
-            max={60}
-            step={0.01}
-            unit="s"
-            onCommit={(v) => updateSimulation({ output_every_s: v })}
           />
         </FieldRow>
       </Section>
@@ -185,30 +198,6 @@ export function ConfigForm({ snapshot, sendCommand, onApplied }: Props) {
             step={0.005}
             unit="m"
             onCommit={(v) => updatePot({ height_m: v })}
-          />
-        </FieldRow>
-        <FieldRow label="Wall thickness">
-          <NumberInput
-            label="w"
-            ariaLabel="pot wall thickness in metres"
-            value={draft.pot.wall_thickness_m}
-            min={0.0005}
-            max={0.02}
-            step={0.0005}
-            unit="m"
-            onCommit={(v) => updatePot({ wall_thickness_m: v })}
-          />
-        </FieldRow>
-        <FieldRow label="Base thickness">
-          <NumberInput
-            label="b"
-            ariaLabel="pot base thickness in metres"
-            value={draft.pot.base_thickness_m}
-            min={0.001}
-            max={0.03}
-            step={0.001}
-            unit="m"
-            onCommit={(v) => updatePot({ base_thickness_m: v })}
           />
         </FieldRow>
       </Section>
@@ -284,20 +273,6 @@ export function ConfigForm({ snapshot, sendCommand, onApplied }: Props) {
             }
           />
         </FieldRow>
-        <FieldRow label="β-carotene C₀" hint="Reference loading; dashboard nutrient presets override this.">
-          <NumberInput
-            label="C"
-            ariaLabel="initial beta-carotene loading"
-            value={draft.carrot.initial_beta_carotene_mg_per_100g}
-            min={0}
-            max={20}
-            step={0.1}
-            unit="mg/100g"
-            onCommit={(v) =>
-              updateCarrot({ initial_beta_carotene_mg_per_100g: v })
-            }
-          />
-        </FieldRow>
       </Section>
 
       {/* --- Heating --- */}
@@ -330,9 +305,119 @@ export function ConfigForm({ snapshot, sendCommand, onApplied }: Props) {
         </FieldRow>
       </Section>
 
-      {/* --- Grid --- */}
-      <Section title="Grid" subtitle="spatial resolution" defaultOpen={false}>
-        <FieldRow label="dx">
+      {/* --- Initial conditions --- */}
+      <Section
+        title="Initial conditions"
+        subtitle="how the pot starts at t = 0"
+      >
+        <FieldRow
+          label="Start state"
+          hint="Cold start simulates filling a room-temperature pot and turning the stove on. Preheated skips the 5–10 min warming transient — useful for focusing on boiling and nutrient kinetics."
+        >
+          <Select<InitialConditionsMode>
+            ariaLabel="initial conditions mode"
+            value={draft.initial_conditions.mode}
+            options={INITIAL_CONDITIONS_OPTIONS}
+            onChange={(v) => updateInitialConditions({ mode: v })}
+          />
+        </FieldRow>
+        {draft.initial_conditions.mode === "preheat" && (
+          <>
+            <FieldRow label="Preheat water" hint="Typical 95 °C: near saturation but still sub-cooled.">
+              <NumberInput
+                label="T"
+                ariaLabel="preheat water temperature"
+                value={draft.initial_conditions.preheat_water_c}
+                min={0}
+                max={105}
+                step={1}
+                unit="°C"
+                onCommit={(v) =>
+                  updateInitialConditions({ preheat_water_c: v })
+                }
+              />
+            </FieldRow>
+            <FieldRow label="Preheat pot wall">
+              <NumberInput
+                label="T"
+                ariaLabel="preheat pot wall temperature"
+                value={draft.initial_conditions.preheat_wall_c}
+                min={0}
+                max={120}
+                step={1}
+                unit="°C"
+                onCommit={(v) =>
+                  updateInitialConditions({ preheat_wall_c: v })
+                }
+              />
+            </FieldRow>
+            <FieldRow label="Preheat carrot">
+              <NumberInput
+                label="T"
+                ariaLabel="preheat carrot temperature"
+                value={draft.initial_conditions.preheat_carrot_c}
+                min={0}
+                max={100}
+                step={1}
+                unit="°C"
+                onCommit={(v) =>
+                  updateInitialConditions({ preheat_carrot_c: v })
+                }
+              />
+            </FieldRow>
+          </>
+        )}
+      </Section>
+
+      {/* --- Solute (preset-driven; physics constants hidden) --- */}
+      <Section
+        title="Solute"
+        subtitle="which nutrient(s) to track"
+      >
+        <FieldRow
+          label="Solute"
+          hint="Kinetic constants (E_a, k₀, D_eff, K_partition, C_water_sat) load from literature values for the chosen solute. Drop a custom YAML into configs/scenarios/ to override."
+        >
+          <Select<SoluteKey>
+            ariaLabel="solute preset"
+            value={currentSolute}
+            options={SOLUTE_OPTIONS}
+            onChange={handleSoluteChange}
+          />
+        </FieldRow>
+      </Section>
+
+      {/* --- Advanced --- */}
+      <Section
+        title="Advanced"
+        subtitle="pot construction + grid resolution — change only if you know why"
+        defaultOpen={false}
+      >
+        <FieldRow label="Pot wall thickness">
+          <NumberInput
+            label="w"
+            ariaLabel="pot wall thickness in metres"
+            value={draft.pot.wall_thickness_m}
+            min={0.0005}
+            max={0.02}
+            step={0.0005}
+            unit="m"
+            onCommit={(v) => updatePot({ wall_thickness_m: v })}
+          />
+        </FieldRow>
+        <FieldRow label="Pot base thickness">
+          <NumberInput
+            label="b"
+            ariaLabel="pot base thickness in metres"
+            value={draft.pot.base_thickness_m}
+            min={0.001}
+            max={0.03}
+            step={0.001}
+            unit="m"
+            onCommit={(v) => updatePot({ base_thickness_m: v })}
+          />
+        </FieldRow>
+        <FieldRow label="Grid dx" hint="2 mm is the dev tier used across Phase-2/3/4 benchmarks; finer dx → sharper boundary layers at higher cost.">
           <NumberInput
             label="dx"
             ariaLabel="grid spacing in millimetres"
@@ -357,369 +442,16 @@ export function ConfigForm({ snapshot, sendCommand, onApplied }: Props) {
             }
           />
         </FieldRow>
-      </Section>
-
-      {/* --- Solver --- */}
-      <Section title="Solver" subtitle="CFL, tolerances, sink coefficients" defaultOpen={false}>
-        <FieldRow label="CFL safety">
-          <Slider
-            ariaLabel="cfl safety factor"
-            value={Math.round(draft.solver.cfl_safety_factor * 100)}
-            min={10}
-            max={50}
-            step={5}
-            onChange={(v) => updateSolver({ cfl_safety_factor: v / 100 })}
-          />
-          <span className="field-row__value">
-            {draft.solver.cfl_safety_factor.toFixed(2)}
-          </span>
-        </FieldRow>
-        <FieldRow label="Max dt">
+        <FieldRow label="Output interval" hint="Only affects offline HDF5; the dashboard stream runs at its own snapshot cadence.">
           <NumberInput
             label="dt"
-            ariaLabel="max timestep in seconds"
-            value={draft.solver.max_dt_s}
-            min={0.001}
-            max={1.0}
+            ariaLabel="HDF5 output interval in seconds"
+            value={draft.simulation.output_every_s}
+            min={0.01}
+            max={60}
             step={0.01}
             unit="s"
-            onCommit={(v) => updateSolver({ max_dt_s: v })}
-          />
-        </FieldRow>
-        <FieldRow label="Pressure tol" hint="Jacobi convergence threshold.">
-          <NumberInput
-            label="ε"
-            ariaLabel="pressure tolerance"
-            value={draft.solver.pressure_tol}
-            min={1e-8}
-            max={1e-2}
-            step={1e-6}
-            onCommit={(v) => updateSolver({ pressure_tol: v })}
-          />
-        </FieldRow>
-        <FieldRow label="Pressure max iters">
-          <NumberInput
-            label="N"
-            ariaLabel="pressure max iterations"
-            value={draft.solver.pressure_max_iter}
-            min={10}
-            max={1000}
-            step={10}
-            onCommit={(v) =>
-              updateSolver({ pressure_max_iter: Math.round(v) })
-            }
-          />
-        </FieldRow>
-        <FieldRow label="Diffusion tol">
-          <NumberInput
-            label="ε"
-            ariaLabel="diffusion tolerance"
-            value={draft.solver.diffusion_tol}
-            min={1e-8}
-            max={1e-2}
-            step={1e-5}
-            onCommit={(v) => updateSolver({ diffusion_tol: v })}
-          />
-        </FieldRow>
-        <FieldRow label="Diffusion max iters">
-          <NumberInput
-            label="N"
-            ariaLabel="diffusion max iterations"
-            value={draft.solver.diffusion_max_iter}
-            min={5}
-            max={200}
-            step={1}
-            onCommit={(v) =>
-              updateSolver({ diffusion_max_iter: Math.round(v) })
-            }
-          />
-        </FieldRow>
-        <FieldRow label="h_conv outer" hint="Newton cooling on outside of the pot wall.">
-          <NumberInput
-            label="h"
-            ariaLabel="outer convective coefficient"
-            value={draft.solver.h_conv_outer_w_per_m2_k}
-            min={0}
-            max={500}
-            step={1}
-            unit="W/m²K"
-            onCommit={(v) => updateSolver({ h_conv_outer_w_per_m2_k: v })}
-          />
-        </FieldRow>
-        <FieldRow label="h_evap free surface" hint="Bigger values pin bulk water closer to T_sat.">
-          <NumberInput
-            label="h"
-            ariaLabel="free-surface evaporation coefficient"
-            value={draft.solver.h_evap_free_surface_w_per_m2_k}
-            min={0}
-            max={5e6}
-            step={1e4}
-            unit="W/m²K"
-            onCommit={(v) =>
-              updateSolver({ h_evap_free_surface_w_per_m2_k: v })
-            }
-          />
-        </FieldRow>
-        <FieldRow label="f_bulk_evap">
-          <NumberInput
-            label="f"
-            ariaLabel="bulk evaporation fraction per second"
-            value={draft.solver.f_bulk_evap_per_s}
-            min={0}
-            max={100}
-            step={0.1}
-            unit="/s"
-            onCommit={(v) => updateSolver({ f_bulk_evap_per_s: v })}
-          />
-        </FieldRow>
-        <FieldRow label="Implicit conduction">
-          <Checkbox
-            label="Use implicit conduction"
-            hint="Backward-Euler; unconditionally stable, slower per step."
-            checked={draft.solver.use_implicit_conduction}
-            onChange={(checked) =>
-              updateSolver({ use_implicit_conduction: checked })
-            }
-          />
-        </FieldRow>
-      </Section>
-
-      {/* --- Boiling --- */}
-      <Section title="Boiling" subtitle="bubble pool + Rohsenow" defaultOpen={false}>
-        <FieldRow label="Enabled">
-          <Checkbox
-            label="Nucleate boiling active"
-            checked={draft.boiling.enabled}
-            onChange={(checked) => updateBoiling({ enabled: checked })}
-          />
-        </FieldRow>
-        <FieldRow label="ONB superheat">
-          <NumberInput
-            label="ΔT"
-            ariaLabel="nucleation onset superheat"
-            value={draft.boiling.dT_onb_k}
-            min={0.1}
-            max={30}
-            step={0.5}
-            unit="K"
-            onCommit={(v) => updateBoiling({ dT_onb_k: v })}
-          />
-        </FieldRow>
-        <FieldRow label="Contact angle">
-          <NumberInput
-            label="θ"
-            ariaLabel="contact angle in radians"
-            value={draft.boiling.contact_angle_rad}
-            min={0.1}
-            max={3.14}
-            step={0.05}
-            unit="rad"
-            onCommit={(v) => updateBoiling({ contact_angle_rad: v })}
-          />
-        </FieldRow>
-        <FieldRow label="Max bubbles">
-          <NumberInput
-            label="N"
-            ariaLabel="max bubble pool size"
-            value={draft.boiling.max_bubbles}
-            min={100}
-            max={1_000_000}
-            step={1000}
-            onCommit={(v) => updateBoiling({ max_bubbles: Math.round(v) })}
-          />
-        </FieldRow>
-        <FieldRow label="Initial radius">
-          <NumberInput
-            label="r"
-            ariaLabel="initial bubble radius in micrometres"
-            value={draft.boiling.initial_bubble_radius_m * 1e6}
-            min={1}
-            max={1000}
-            step={1}
-            unit="µm"
-            onCommit={(um) =>
-              updateBoiling({ initial_bubble_radius_m: um * 1e-6 })
-            }
-          />
-        </FieldRow>
-        <FieldRow label="Nucleation probability">
-          <NumberInput
-            label="p"
-            ariaLabel="nucleation probability per step"
-            value={draft.boiling.nucleation_probability_per_step}
-            min={0}
-            max={1}
-            step={0.01}
-            onCommit={(v) =>
-              updateBoiling({ nucleation_probability_per_step: v })
-            }
-          />
-        </FieldRow>
-        <FieldRow label="C_sf Rohsenow">
-          <NumberInput
-            label="C"
-            ariaLabel="rohsenow surface factor"
-            value={draft.boiling.C_sf_rohsenow}
-            min={0.001}
-            max={0.1}
-            step={0.001}
-            onCommit={(v) => updateBoiling({ C_sf_rohsenow: v })}
-          />
-        </FieldRow>
-        <FieldRow label="Pr_n Rohsenow">
-          <NumberInput
-            label="n"
-            ariaLabel="rohsenow prandtl exponent"
-            value={draft.boiling.Pr_n_rohsenow}
-            min={0.5}
-            max={2.0}
-            step={0.1}
-            onCommit={(v) => updateBoiling({ Pr_n_rohsenow: v })}
-          />
-        </FieldRow>
-      </Section>
-
-      {/* --- Nutrient (primary) --- */}
-      <Section title="Nutrient — primary" subtitle="β-carotene / vitamin C / etc.">
-        <FieldRow label="Enabled">
-          <Checkbox
-            label="Track primary solute"
-            checked={draft.nutrient.enabled}
-            onChange={(checked) => updateNutrient({ enabled: checked })}
-          />
-        </FieldRow>
-        <FieldRow label="E_a">
-          <NumberInput
-            label="E"
-            ariaLabel="activation energy"
-            value={draft.nutrient.E_a_kJ_per_mol}
-            min={10}
-            max={200}
-            step={1}
-            unit="kJ/mol"
-            onCommit={(v) => updateNutrient({ E_a_kJ_per_mol: v })}
-          />
-        </FieldRow>
-        <FieldRow label="k₀">
-          <NumberInput
-            label="k"
-            ariaLabel="Arrhenius prefactor"
-            value={draft.nutrient.k0_per_s}
-            min={1}
-            max={1e12}
-            step={1e5}
-            unit="/s"
-            onCommit={(v) => updateNutrient({ k0_per_s: v })}
-          />
-        </FieldRow>
-        <FieldRow label="D_eff">
-          <NumberInput
-            label="D"
-            ariaLabel="effective diffusivity in carrot"
-            value={draft.nutrient.D_eff_m2_per_s}
-            min={1e-12}
-            max={1e-7}
-            step={1e-11}
-            unit="m²/s"
-            onCommit={(v) => updateNutrient({ D_eff_m2_per_s: v })}
-          />
-        </FieldRow>
-        <FieldRow label="K partition" hint="≈1e-5 for β-carotene, ≈1.0 for water-soluble.">
-          <NumberInput
-            label="K"
-            ariaLabel="partition coefficient"
-            value={draft.nutrient.K_partition}
-            min={1e-7}
-            max={10}
-            step={0.001}
-            onCommit={(v) => updateNutrient({ K_partition: v })}
-          />
-        </FieldRow>
-        <FieldRow label="C_water sat">
-          <NumberInput
-            label="C"
-            ariaLabel="water-side saturation concentration"
-            value={draft.nutrient.C_water_sat_mg_per_kg}
-            min={1e-4}
-            max={1e8}
-            step={1}
-            unit="mg/kg"
-            onCommit={(v) => updateNutrient({ C_water_sat_mg_per_kg: v })}
-          />
-        </FieldRow>
-        <FieldRow label="C₀">
-          <NumberInput
-            label="C"
-            ariaLabel="initial carrot concentration"
-            value={draft.nutrient.C0_mg_per_kg}
-            min={0}
-            max={1e4}
-            step={1}
-            unit="mg/kg"
-            onCommit={(v) => updateNutrient({ C0_mg_per_kg: v })}
-          />
-        </FieldRow>
-      </Section>
-
-      {/* --- Nutrient 2 (secondary, opt-in) --- */}
-      <Section
-        title="Nutrient — secondary"
-        subtitle="dual-solute track"
-        defaultOpen={false}
-      >
-        <FieldRow label="Enabled">
-          <Checkbox
-            label="Track a second solute concurrently"
-            hint="Requires primary nutrient enabled."
-            checked={draft.nutrient2.enabled}
-            onChange={(checked) => updateNutrient2({ enabled: checked })}
-          />
-        </FieldRow>
-        <FieldRow label="E_a">
-          <NumberInput
-            label="E"
-            ariaLabel="secondary activation energy"
-            value={draft.nutrient2.E_a_kJ_per_mol}
-            min={10}
-            max={200}
-            step={1}
-            unit="kJ/mol"
-            onCommit={(v) => updateNutrient2({ E_a_kJ_per_mol: v })}
-          />
-        </FieldRow>
-        <FieldRow label="k₀">
-          <NumberInput
-            label="k"
-            ariaLabel="secondary Arrhenius prefactor"
-            value={draft.nutrient2.k0_per_s}
-            min={1}
-            max={1e12}
-            step={1e5}
-            unit="/s"
-            onCommit={(v) => updateNutrient2({ k0_per_s: v })}
-          />
-        </FieldRow>
-        <FieldRow label="K partition">
-          <NumberInput
-            label="K"
-            ariaLabel="secondary partition coefficient"
-            value={draft.nutrient2.K_partition}
-            min={1e-7}
-            max={10}
-            step={0.001}
-            onCommit={(v) => updateNutrient2({ K_partition: v })}
-          />
-        </FieldRow>
-        <FieldRow label="C₀">
-          <NumberInput
-            label="C"
-            ariaLabel="secondary initial concentration"
-            value={draft.nutrient2.C0_mg_per_kg}
-            min={0}
-            max={1e4}
-            step={1}
-            unit="mg/kg"
-            onCommit={(v) => updateNutrient2({ C0_mg_per_kg: v })}
+            onCommit={(v) => updateSimulation({ output_every_s: v })}
           />
         </FieldRow>
       </Section>

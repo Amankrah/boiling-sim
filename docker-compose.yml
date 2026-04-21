@@ -6,7 +6,7 @@
 #     docker compose up --build
 #
 # Then open http://localhost:3000 in a browser. nginx inside the `web`
-# container proxies /stream to ws-server:8080, so the browser only
+# container proxies /stream and /api to ws-server:8080, so the browser only
 # needs port 3000 exposed. The ws-server container is not published to
 # the host.
 #
@@ -22,7 +22,7 @@ services:
       dockerfile: Dockerfile.wsserver
     restart: unless-stopped
     # 8080 (WS), 8765 (Python ingest), 8766 (Python control). None
-    # published to the host -- the web container proxies /stream, and
+    # published to the host -- the web container proxies /stream and /api, and
     # the solver reaches ingest/control by container DNS.
     expose:
       - "8080"
