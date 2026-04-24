@@ -1,0 +1,138 @@
+{
+  "run_id": "f15fbed0a795407e9e2cc4ad9faaa868",
+  "schema_version": 3,
+  "n_samples": 5507,
+  "wall_clock_s": 218.96469845100364,
+  "t_sim_total_s": 599.9524765485355,
+  "step_count": 0,
+  "s_per_sim_s": 0.36497007181416247,
+  "snapshot_cadence_hz": 9.179060367716458,
+  "nutrient_primary_name": "\u03b2-carotene",
+  "nutrient_secondary_name": "",
+  "final": {
+    "t_sim_s": 599.9524765485355,
+    "T_water_mean_c": 49.81308649236506,
+    "T_water_max_c": 73.38589144620029,
+    "T_water_min_c": 44.4094014115767,
+    "T_wall_inner_mean_c": 106.44969160600142,
+    "T_wall_inner_max_c": 111.66538696289062,
+    "n_active_bubbles": 4784,
+    "retention_pct": 99.67792360350492,
+    "leached_pct": 0.0016685619239347525,
+    "degraded_pct": 0.17290325998728942,
+    "precipitated_pct": 0.14750457458384675,
+    "retention2_pct": 100.0,
+    "leached2_pct": 0.0,
+    "degraded2_pct": 0.0,
+    "precipitated2_pct": 0.0
+  },
+  "acceptance": [
+    {
+      "name": "Retention in expected band [80, 90] %",
+      "passed": false,
+      "detail": "R(t_end) = 99.68 % (target [80, 90])"
+    },
+    {
+      "name": "Mass-balance invariant (primary solute)",
+      "passed": true,
+      "detail": "max |sum - 100| = 0.000 pp (gate < 0.5 pp)"
+    },
+    {
+      "name": "Water temperature pinned at saturation",
+      "passed": false,
+      "detail": "|T_water - 100| over final quarter: max 53.83 K (gate < 2 K)"
+    },
+    {
+      "name": "No NaN in retention trace",
+      "passed": true,
+      "detail": "retention + water T finite at every sample"
+    }
+  ],
+  "mass_balance": {
+    "max_abs_drift_pct": 1.4210854715202004e-14,
+    "final_sum_pct": 99.99999999999999
+  },
+  "parameters": {
+    "pot": {
+      "diameter_m": 0.2,
+      "height_m": 0.12,
+      "wall_thickness_m": 0.003,
+      "base_thickness_m": 0.005,
+      "material": "steel_304"
+    },
+    "water": {
+      "fill_fraction": 0.75,
+      "initial_temp_c": 20.0
+    },
+    "carrot": {
+      "diameter_m": 0.025,
+      "length_m": 0.05,
+      "position": [
+        0.0,
+        0.0,
+        0.03
+      ],
+      "initial_beta_carotene_mg_per_100g": 8.3
+    },
+    "heating": {
+      "base_heat_flux_w_per_m2": 30000.0,
+      "ambient_temp_c": 22.0
+    },
+    "initial_conditions": {
+      "mode": "cold",
+      "preheat_water_c": 95.0,
+      "preheat_wall_c": 100.0,
+      "preheat_carrot_c": 20.0
+    },
+    "grid": {
+      "dx_m": 0.002,
+      "carrot_mesh_resolution": 40
+    },
+    "solver": {
+      "cfl_safety_factor": 0.4,
+      "max_dt_s": 0.1,
+      "pressure_tol": 1e-05,
+      "pressure_max_iter": 100,
+      "diffusion_tol": 0.0001,
+      "diffusion_max_iter": 15,
+      "h_conv_outer_w_per_m2_k": 10.0,
+      "h_evap_free_surface_w_per_m2_k": 50000.0,
+      "f_bulk_evap_per_s": 1.0,
+      "use_implicit_conduction": true
+    },
+    "boiling": {
+      "enabled": true,
+      "dT_onb_k": 5.0,
+      "contact_angle_rad": 1.0,
+      "max_bubbles": 100000,
+      "initial_bubble_radius_m": 1e-05,
+      "nucleation_probability_per_step": 0.1,
+      "C_sf_rohsenow": 0.013,
+      "Pr_n_rohsenow": 1.0
+    },
+    "nutrient": {
+      "enabled": true,
+      "E_a_kJ_per_mol": 70.0,
+      "k0_per_s": 2630000.0,
+      "D_eff_m2_per_s": 2e-10,
+      "K_partition": 1e-05,
+      "C_water_sat_mg_per_kg": 0.006,
+      "C0_mg_per_kg": 83.0,
+      "nu_water_m2_per_s": 2.94e-07,
+      "D_water_molec_m2_per_s": 1e-09
+    },
+    "nutrient2": {
+      "enabled": false,
+      "E_a_kJ_per_mol": 74.0,
+      "k0_per_s": 11000000.0,
+      "D_eff_m2_per_s": 5e-10,
+      "K_partition": 1.0,
+      "C_water_sat_mg_per_kg": 1000000.0,
+      "C0_mg_per_kg": 59.0,
+      "nu_water_m2_per_s": 2.94e-07,
+      "D_water_molec_m2_per_s": 1e-09
+    },
+    "total_time_s": 600.0,
+    "output_every_s": 0.1
+  }
+}

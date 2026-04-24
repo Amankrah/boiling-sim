@@ -167,6 +167,43 @@ def mikic_rohsenow_radius(age_s: float, T_local_k: float, T_sat_k: float,
     return 1.1283791670955126 * Ja * wp.sqrt(alpha_l * age_s)
 
 
+@wp.func
+def _condensation_decrement(
+    R: float,
+    T_local_k: float,
+    T_sat_k: float,
+    rho_l: float,
+    rho_v: float,
+    cp_l: float,
+    k_l: float,
+    h_lv: float,
+    dt: float,
+) -> float:
+    """Plesset-Zwick-style diffusion-controlled condensation shrinkage.
+
+    Symmetric counterpart to :func:`mikic_rohsenow_radius`: a vapor bubble in
+    subcooled liquid shrinks at
+        dR/dt = -(2/sqrt(pi)) * Ja_sub * alpha_l / R
+    where ``Ja_sub = rho_l * c_p,l * (T_sat - T_local) / (rho_v * h_lv)``
+    (positive when the local liquid is subcooled). Returns the *positive*
+    radius decrement for this step; caller subtracts it from the current
+    radius. Returns 0 at or above saturation (no condensation drive). The
+    1/R dependence means the rate accelerates as the bubble shrinks -- once
+    condensation starts, full collapse typically completes within 1-2 dt
+    steps for bubbles below ~100 um in strongly subcooled liquid.
+    """
+    dT_sub = T_sat_k - T_local_k
+    if dT_sub <= 0.0:
+        return 0.0
+    if R <= 0.0:
+        return 0.0
+    Ja_sub = rho_l * cp_l * dT_sub / (rho_v * h_lv)
+    alpha_l = k_l / (rho_l * cp_l)
+    # 2/sqrt(pi) ~ 1.1283791670955126
+    rate = 1.1283791670955126 * Ja_sub * alpha_l / R   # [m/s]
+    return rate * dt
+
+
 # ---------------------------------------------------------------------------
 # BubblePool: device-side pool + site-active bookkeeping
 # ---------------------------------------------------------------------------
@@ -560,13 +597,19 @@ def update_bubbles(
     theta_rad: float,
     g_mag: float,
     slip_velocity: float,
+    R_seed: float,
     mat_fluid: int,
 ):
-    """Advance one bubble: Mikic-Rohsenow growth -> Fritz departure -> advect ->
-    vent at free surface or on contact with a solid.
+    """Advance one bubble: Mikic-Rohsenow growth in superheated liquid,
+    Plesset-Zwick condensation shrinkage in subcooled liquid, Fritz departure,
+    advect, vent at free surface or on contact with a solid.
 
-    When a bubble deactivates, clear ``slot_claim[b_idx]`` so the slot is
-    reusable by the next nucleation step.
+    When a bubble deactivates (vented, entered solid, or fully condensed),
+    clear ``slot_claim[b_idx]`` so the slot is reusable by the next nucleation
+    step. Full condensation additionally clears the nucleation-site active
+    flag and deposits the bubble's remaining latent heat back into the local
+    8-cell fluid stencil via trilinear atomic-add (symmetric to
+    :func:`scatter_latent_heat`'s atomic-sub path).
     """
     b_idx = wp.tid()
     bubble = bubbles[b_idx]
@@ -576,16 +619,92 @@ def update_bubbles(
     # Sample local liquid temperature at bubble centre.
     T_local = _sample_cell_scalar(T, bubble.position, origin, dx)
 
-    # Target radius from Mikic-Rohsenow thermal growth.
-    age = current_time - bubble.birth_time
-    if age < 0.0:
-        age = 0.0
-    R_target = mikic_rohsenow_radius(
-        age, T_local, T_sat_k, rho_l, rho_v, cp_l, k_l, h_lv,
-    )
-    # R grows monotonically (no condensation shrinkage in Phase 3).
-    if R_target > bubble.radius:
-        bubble.radius = R_target
+    if T_local > T_sat_k:
+        # --- Superheated liquid: Mikic-Rohsenow monotonic growth. -----------
+        age = current_time - bubble.birth_time
+        if age < 0.0:
+            age = 0.0
+        R_target = mikic_rohsenow_radius(
+            age, T_local, T_sat_k, rho_l, rho_v, cp_l, k_l, h_lv,
+        )
+        if R_target > bubble.radius:
+            bubble.radius = R_target
+    else:
+        # --- Subcooled liquid: Plesset-Zwick condensation shrinkage. --------
+        # Every step we compute the radius decrement, clamp to a floor at
+        # R_seed, and scatter the latent heat of the *volume lost this step*
+        # back into the local 8-cell fluid stencil (mirror of
+        # scatter_latent_heat: atomic_add here, atomic_sub there). This
+        # preserves energy conservation: every mg of vapor that condenses
+        # deposits its h_lv into the fluid at the same step, not at the
+        # final collapse event. When the clamped radius hits R_seed the
+        # bubble deactivates; the site-active flag is cleared so a fresh
+        # bubble can nucleate here next step.
+        R_old = bubble.radius
+        dR = _condensation_decrement(
+            R_old, T_local, T_sat_k,
+            rho_l, rho_v, cp_l, k_l, h_lv, dt,
+        )
+        R_new_raw = R_old - dR
+        fully_condensed = (R_new_raw <= R_seed)
+        R_new = R_seed if fully_condensed else R_new_raw
+
+        # Volume lost this step (R_old > R_new guaranteed; R_old^3 - R_new^3).
+        V_lost = (4.0 * 3.14159265358979 / 3.0) * (
+            R_old * R_old * R_old - R_new * R_new * R_new
+        )
+        if V_lost > 0.0:
+            E_release = rho_v * h_lv * V_lost
+            cell_volume = dx * dx * dx
+            dT_ref = E_release / (rho_l * cp_l * cell_volume)
+
+            fx = (bubble.position[0] - origin[0]) / dx - 0.5
+            fy = (bubble.position[1] - origin[1]) / dx - 0.5
+            fz = (bubble.position[2] - origin[2]) / dx - 0.5
+            nx = T.shape[0]
+            ny = T.shape[1]
+            nz = T.shape[2]
+            fx = wp.clamp(fx, 0.0, float(nx - 1) - 1.0e-6)
+            fy = wp.clamp(fy, 0.0, float(ny - 1) - 1.0e-6)
+            fz = wp.clamp(fz, 0.0, float(nz - 1) - 1.0e-6)
+            i0 = int(fx); j0 = int(fy); k0 = int(fz)
+            tx = fx - float(i0); ty = fy - float(j0); tz = fz - float(k0)
+            w000 = (1.0 - tx) * (1.0 - ty) * (1.0 - tz)
+            w100 = tx * (1.0 - ty) * (1.0 - tz)
+            w010 = (1.0 - tx) * ty * (1.0 - tz)
+            w110 = tx * ty * (1.0 - tz)
+            w001 = (1.0 - tx) * (1.0 - ty) * tz
+            w101 = tx * (1.0 - ty) * tz
+            w011 = (1.0 - tx) * ty * tz
+            w111 = tx * ty * tz
+            if mat[i0, j0, k0] == mat_fluid:
+                wp.atomic_add(T, i0, j0, k0, dT_ref * w000)
+            if mat[i0 + 1, j0, k0] == mat_fluid:
+                wp.atomic_add(T, i0 + 1, j0, k0, dT_ref * w100)
+            if mat[i0, j0 + 1, k0] == mat_fluid:
+                wp.atomic_add(T, i0, j0 + 1, k0, dT_ref * w010)
+            if mat[i0 + 1, j0 + 1, k0] == mat_fluid:
+                wp.atomic_add(T, i0 + 1, j0 + 1, k0, dT_ref * w110)
+            if mat[i0, j0, k0 + 1] == mat_fluid:
+                wp.atomic_add(T, i0, j0, k0 + 1, dT_ref * w001)
+            if mat[i0 + 1, j0, k0 + 1] == mat_fluid:
+                wp.atomic_add(T, i0 + 1, j0, k0 + 1, dT_ref * w101)
+            if mat[i0, j0 + 1, k0 + 1] == mat_fluid:
+                wp.atomic_add(T, i0, j0 + 1, k0 + 1, dT_ref * w011)
+            if mat[i0 + 1, j0 + 1, k0 + 1] == mat_fluid:
+                wp.atomic_add(T, i0 + 1, j0 + 1, k0 + 1, dT_ref * w111)
+
+        if fully_condensed:
+            if bubble.site_cleared == 0 and bubble.site_i >= 0:
+                site_active[bubble.site_i, bubble.site_j, bubble.site_k] = 0
+                bubble.site_cleared = 1
+            bubble.active = 0
+            bubble.radius = 0.0
+            bubbles[b_idx] = bubble
+            slot_claim[b_idx] = 0
+            return
+        else:
+            bubble.radius = R_new
 
     # Departure check: 2*R >= Fritz D_d.
     D_d = fritz_departure_diameter(theta_rad, sigma, g_mag, rho_l, rho_v)
@@ -1100,6 +1219,7 @@ def step_update_bubbles(
             cfg.boiling.contact_angle_rad,
             g_mag,
             slip,
+            cfg.boiling.initial_bubble_radius_m,
             MAT_FLUID,
         ],
         device=device,

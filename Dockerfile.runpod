@@ -1,0 +1,162 @@
+# Phase 6 RunPod unified image.
+#
+# Collapses the docker-compose three-service stack (ws-server + solver + web)
+# into ONE container so it runs on RunPod, which is single-container per pod.
+# Three processes live under supervisord and talk over loopback:
+#
+#   * nginx             :80            public web + proxy /stream + /api
+#   * ws-server         :8080          WebSocket broadcast + HTTP /api
+#                       :8765, :8766   TCP ingest + control (from solver)
+#   * run_dashboard.py  (no port)      producer, connects to ws-server:8765/6
+#
+# RunPod exposes port 80 via its HTTPS proxy at
+#   https://{pod-id}-80.proxy.runpod.net/
+# so browsers only need port 80. All other ports are pod-internal.
+#
+# Build LOCALLY on a GPU host (your workstation) if you want the Warp JIT
+# cache baked in (saves ~45 s on every cold pod boot). Build without a GPU
+# also works -- the Warp precompile step is wrapped in `|| true` so it
+# becomes a no-op on GHCR's GPU-less runners.
+#
+#   docker build -f Dockerfile.runpod -t ghcr.io/amankrah/boiling-sim:v0.1 .
+#   docker push ghcr.io/amankrah/boiling-sim:v0.1
+#
+# Expected final-image size: ~6-8 GB (CUDA 12.6 runtime is ~3 GB of that).
+
+# --- Stage 1: Rust ws-server build -------------------------------------
+FROM rust:1.82-slim-bookworm AS rust_build
+
+WORKDIR /build
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        pkg-config libssl-dev build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+
+# Same workspace-member patch as Dockerfile.wsserver: drop the CUDA-linked
+# crates from the build graph since this stage has no CUDA toolkit.
+RUN sed -i 's|"crates/sim-core", ||; s|"crates/cuda-kernels", ||' Cargo.toml \
+    && cargo build --release --bin ws-server \
+    && strip target/release/ws-server
+
+
+# --- Stage 2: React web bundle -----------------------------------------
+FROM node:20-alpine AS web_build
+
+WORKDIR /app/web
+
+COPY web/package.json web/package-lock.json* ./
+RUN if [ -f package-lock.json ]; then \
+        npm ci --include=dev --no-audit --no-fund; \
+    else \
+        npm install --include=dev --no-audit --no-fund; \
+    fi
+
+COPY web/tsconfig.json web/vite.config.ts web/index.html ./
+COPY web/src ./src
+
+ENV NODE_ENV=production
+RUN ./node_modules/.bin/tsc --noEmit \
+    && ./node_modules/.bin/vite build
+
+
+# --- Stage 3: Runtime ---------------------------------------------------
+FROM nvidia/cuda:12.6.1-devel-ubuntu22.04 AS runtime
+
+# Python, nginx, supervisord, build toolchain (for pip wheel compiles).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        software-properties-common ca-certificates curl \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3.11 python3.11-venv python3.11-dev python3-pip \
+        build-essential git \
+        libhdf5-dev libgl1 libglib2.0-0 \
+        nginx supervisor \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
+
+WORKDIR /app
+
+# Python deps in their own layer so source changes don't invalidate.
+COPY pyproject.toml ./
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir \
+        "warp-lang[examples]" \
+        numpy scipy matplotlib h5py pyvista trimesh pygmsh meshio \
+        usd-core fastapi "uvicorn[standard]" websockets zstandard msgpack \
+        pyyaml pydantic
+
+# Project source + configs.
+COPY python ./python
+COPY configs ./configs
+COPY scripts ./scripts
+COPY data ./data
+
+RUN pip install --no-cache-dir --no-deps -e .
+
+# Bring in the compiled Rust binary + the built web bundle from the other stages.
+COPY --from=rust_build /build/target/release/ws-server /usr/local/bin/ws-server
+COPY --from=web_build /app/web/dist /usr/share/nginx/html
+
+# RunPod-specific configs: nginx proxies to 127.0.0.1 (single container, no
+# docker-network DNS); supervisord orchestrates the three procs.
+COPY runpod/nginx.runpod.conf /etc/nginx/sites-available/default
+RUN rm -f /etc/nginx/sites-enabled/default \
+    && ln -s /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
+COPY runpod/supervisord.conf /etc/supervisor/conf.d/boilingsim.conf
+
+# Precheck script (shared with the per-service Dockerfile.solver path).
+COPY scripts/dashboard_precheck.sh /usr/local/bin/dashboard_precheck
+RUN chmod +x /usr/local/bin/dashboard_precheck
+
+# Persistent artefacts directory (mount a RunPod volume here to survive
+# pod restarts; otherwise contents are ephemeral, which is fine for demos).
+RUN mkdir -p /workspace/dashboard_runs
+ENV BOILINGSIM_ARTIFACTS_DIR=/workspace/dashboard_runs
+
+# Warp JIT pre-compile. Skipped silently if no GPU at build time so this
+# Dockerfile works on GPU-less CI runners; on a GPU build host this saves
+# ~45 s from every pod cold start.
+RUN python - <<'PYEOF' || echo "[runpod build] Warp precompile skipped (no GPU at build time)"
+import os, warp as wp
+wp.init()
+if wp.get_cuda_device_count() > 0:
+    from boilingsim.config import load_scenario
+    from boilingsim.pipeline import Simulation
+    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg.grid.dx_m = 0.004  # coarse, just to touch every kernel
+    cfg.boiling.enabled = True
+    sim = Simulation(cfg, device="cuda:0")
+    for _ in range(3):
+        sim.step()
+    print("[runpod build] Warp JIT cache warmed.")
+else:
+    print("[runpod build] No CUDA device visible at build time, skipping precompile.")
+PYEOF
+
+# Solver env -- single-container means loopback for everything.
+ENV BOILINGSIM_CONFIG=configs/scenarios/default.yaml \
+    BOILINGSIM_DURATION=0 \
+    BOILINGSIM_DX_MM=2.0 \
+    BOILINGSIM_PRESSURE_ITERS=100 \
+    BOILINGSIM_SNAPSHOT_HZ=30 \
+    BOILINGSIM_INGEST_HOST=127.0.0.1 \
+    BOILINGSIM_INGEST_PORT=8765 \
+    BOILINGSIM_CONTROL_HOST=127.0.0.1 \
+    BOILINGSIM_CONTROL_PORT=8766 \
+    RUST_LOG=info \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+EXPOSE 80
+
+# supervisord runs nginx + ws-server + dashboard_precheck in the right order.
+# -n keeps it in the foreground so Docker sees it as PID 1.
+CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]

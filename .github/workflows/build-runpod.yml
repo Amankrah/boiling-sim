@@ -1,0 +1,99 @@
+# Build and publish the unified RunPod image to GHCR on every tag push.
+#
+# Notes:
+#
+# 1. GitHub-hosted runners have no NVIDIA GPU, so the `Warp JIT precompile`
+#    layer in Dockerfile.runpod is a silent no-op here. Cold-start on RunPod
+#    will lose ~45 s vs a GPU-built image. If that overhead matters (e.g.
+#    for a timed demo), rebuild locally on your workstation before the
+#    event — the local build process is documented in runpod/README.md.
+#
+# 2. Images are tagged with the git tag AND `latest`. RunPod templates
+#    pointing at `:latest` will pick up the newest build automatically
+#    on the next pod deploy; pinned tags are stable for reproducibility
+#    (recommended for paper submissions).
+#
+# 3. Runs on tag pushes matching `v*` (e.g. v0.1, v1.0-ijhmt). Manual
+#    dispatch also supported for out-of-band rebuilds.
+
+name: build-runpod
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish as (defaults to `manual-<sha>`).'
+        required: false
+        default: ''
+
+jobs:
+  build-and-push:
+    name: build + push to ghcr.io
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          elif [[ -n "${{ inputs.tag }}" ]]; then
+            VERSION="${{ inputs.tag }}"
+          else
+            VERSION="manual-$(git rev-parse --short HEAD)"
+          fi
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          REPO="${REPO,,}"
+          IMAGE="ghcr.io/${OWNER}/${REPO}"
+          {
+            echo "version=${VERSION}"
+            echo "tags=${IMAGE}:${VERSION},${IMAGE}:latest"
+          } >> "$GITHUB_OUTPUT"
+          echo "Will publish: ${IMAGE}:${VERSION} and ${IMAGE}:latest"
+
+      - name: Build + push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.runpod
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          # Runner has no GPU; the Warp precompile layer in the Dockerfile
+          # swallows the error via `|| echo ...`, so the build completes.
+          # Cold-start on RunPod adds ~45 s of JIT compile on first sim step.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          echo "### Published BoilingSim image" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tags:" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.tags.outputs.tags }}" | tr ',' '\n' >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Update the RunPod template's Container Image field to pick up this build." >> "$GITHUB_STEP_SUMMARY"
+          echo "See [runpod/README.md](../runpod/README.md) for the per-demo workflow." >> "$GITHUB_STEP_SUMMARY"
