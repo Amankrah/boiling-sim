@@ -68,10 +68,17 @@ RUN ./node_modules/.bin/tsc --noEmit \
 # --- Stage 3: Runtime ---------------------------------------------------
 FROM nvidia/cuda:12.6.1-devel-ubuntu22.04 AS runtime
 
+# Non-interactive apt: tzdata (pulled in transitively by nginx) otherwise
+# blocks the build asking "Geographic area:". ARG scopes the flag to the
+# build only so it doesn't leak into the container's runtime env; TZ is
+# set as ENV because that *is* legitimate container state.
+ARG DEBIAN_FRONTEND=noninteractive
+ENV TZ=Etc/UTC
+
 # Python, nginx, supervisord, build toolchain (for pip wheel compiles).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        software-properties-common ca-certificates curl \
+        software-properties-common ca-certificates curl tzdata \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
