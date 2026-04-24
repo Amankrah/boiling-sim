@@ -131,27 +131,21 @@ ENV BOILINGSIM_ARTIFACTS_DIR=/workspace/dashboard_runs
 #
 # Without the guard, `wp.init()` on a GPU-less box can block indefinitely
 # trying to probe the NVIDIA driver, which blows past GH Actions' 6-hour
-# job timeout and fails the whole workflow. The `timeout 120s` on the
-# heredoc is a second line of defence in case the /dev/nvidia0 probe
-# succeeds for some reason but Warp itself then stalls.
+# job timeout and fails the whole workflow. The `timeout 120s` is a
+# second line of defence in case the /dev/nvidia0 probe succeeds for
+# some reason but Warp itself then stalls.
+#
+# The Python payload lives in runpod/precompile_warp.py rather than an
+# inline heredoc because BuildKit's parser can't correctly locate the
+# heredoc delimiter when the RUN is wrapped in an `if/then/fi` block.
+COPY runpod/precompile_warp.py /tmp/precompile_warp.py
 RUN if [ -e /dev/nvidia0 ]; then \
-        timeout 120s python - <<'PYEOF' || echo "[runpod build] Warp precompile hit timeout; image still usable, cold-start will JIT."
-import warp as wp
-wp.init()
-if wp.get_cuda_device_count() > 0:
-    from boilingsim.config import load_scenario
-    from boilingsim.pipeline import Simulation
-    cfg = load_scenario("configs/scenarios/default.yaml")
-    cfg.grid.dx_m = 0.004  # coarse, just to touch every kernel
-    cfg.boiling.enabled = True
-    sim = Simulation(cfg, device="cuda:0")
-    for _ in range(3):
-        sim.step()
-    print("[runpod build] Warp JIT cache warmed.")
-PYEOF \
+        timeout 120s python /tmp/precompile_warp.py \
+            || echo "[runpod build] Warp precompile hit timeout or errored; image still usable, cold-start will JIT."; \
     else \
         echo "[runpod build] No GPU at build time (GHA CI or non-GPU host); skipping Warp precompile. Cold-start on RunPod will JIT ~45 s."; \
-    fi
+    fi \
+    && rm -f /tmp/precompile_warp.py
 
 # Solver env -- single-container means loopback for everything.
 ENV BOILINGSIM_CONFIG=configs/scenarios/default.yaml \
