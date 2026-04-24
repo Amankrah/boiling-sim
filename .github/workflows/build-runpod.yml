@@ -33,6 +33,10 @@ jobs:
   build-and-push:
     name: build + push to ghcr.io
     runs-on: ubuntu-latest
+    # Cap the job at 45 min. A healthy cold build lands in 15-20 min; anything
+    # past 45 is almost certainly a hang (e.g. Warp JIT probing an absent GPU
+    # driver). Fail loudly rather than silently eat the 6-hour GHA default.
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write

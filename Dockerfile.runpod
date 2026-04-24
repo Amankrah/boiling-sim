@@ -123,11 +123,20 @@ RUN chmod +x /usr/local/bin/dashboard_precheck
 RUN mkdir -p /workspace/dashboard_runs
 ENV BOILINGSIM_ARTIFACTS_DIR=/workspace/dashboard_runs
 
-# Warp JIT pre-compile. Skipped silently if no GPU at build time so this
-# Dockerfile works on GPU-less CI runners; on a GPU build host this saves
-# ~45 s from every pod cold start.
-RUN python - <<'PYEOF' || echo "[runpod build] Warp precompile skipped (no GPU at build time)"
-import os, warp as wp
+# Warp JIT pre-compile. Only runs when a GPU is visible at build time
+# (i.e. when you `docker build` on your workstation with --gpus). In CI
+# or any GPU-less build host this layer is a fast no-op:
+#
+#   * `ls /dev/nvidia0` fails in 10 ms → jump straight to the skip path.
+#
+# Without the guard, `wp.init()` on a GPU-less box can block indefinitely
+# trying to probe the NVIDIA driver, which blows past GH Actions' 6-hour
+# job timeout and fails the whole workflow. The `timeout 120s` on the
+# heredoc is a second line of defence in case the /dev/nvidia0 probe
+# succeeds for some reason but Warp itself then stalls.
+RUN if [ -e /dev/nvidia0 ]; then \
+        timeout 120s python - <<'PYEOF' || echo "[runpod build] Warp precompile hit timeout; image still usable, cold-start will JIT."
+import warp as wp
 wp.init()
 if wp.get_cuda_device_count() > 0:
     from boilingsim.config import load_scenario
@@ -139,9 +148,10 @@ if wp.get_cuda_device_count() > 0:
     for _ in range(3):
         sim.step()
     print("[runpod build] Warp JIT cache warmed.")
-else:
-    print("[runpod build] No CUDA device visible at build time, skipping precompile.")
-PYEOF
+PYEOF \
+    else \
+        echo "[runpod build] No GPU at build time (GHA CI or non-GPU host); skipping Warp precompile. Cold-start on RunPod will JIT ~45 s."; \
+    fi
 
 # Solver env -- single-container means loopback for everything.
 ENV BOILINGSIM_CONFIG=configs/scenarios/default.yaml \
