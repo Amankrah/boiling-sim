@@ -48,6 +48,10 @@ Desktop.ini
 *.vtk
 profiles/
 
+# Dashboard run artefacts (per-run {h5,csv,json}; keep the dir, ignore contents)
+dashboard_runs/*
+!dashboard_runs/.gitkeep
+
 # Logs
 *.log
 
