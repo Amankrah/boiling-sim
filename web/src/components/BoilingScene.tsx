@@ -87,8 +87,15 @@ export function BoilingScene({
       </Suspense>
 
       {/* --- reference floor grid --------------------------- */}
+      {/* Positioned at the stove cabinet's base (z = -0.458 m from
+          Stove.tsx CAB_BASE_Z) so the grid reads visually as the
+          floor the stove stands on. The simulation's z = 0 plane
+          is the pot base / cooktop top, ~46 cm above the grid.
+          Keeping this as a separate reference plane avoids the
+          visual illusion of the stove being "sunk into the floor"
+          that came from rendering the grid at simulation z = 0. */}
       <Grid
-        position={[0, 0, 0]}
+        position={[0, 0, -0.458]}
         args={[2, 2]}
         cellSize={0.02}
         cellThickness={0.6}

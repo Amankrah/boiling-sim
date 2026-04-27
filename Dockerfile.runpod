@@ -75,7 +75,13 @@ FROM nvidia/cuda:12.6.1-devel-ubuntu22.04 AS runtime
 ARG DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
 
-# Python, nginx, supervisord, build toolchain (for pip wheel compiles).
+# Python, nginx, build toolchain. NOTE: supervisor is intentionally NOT
+# installed via apt — apt's supervisor 4.2.1 is built against Ubuntu's
+# system Python 3.10, and our update-alternatives to Python 3.11 + pip
+# upgrades to setuptools/wheel break apt-supervisor's entry-point lookup
+# at runtime (silent crash in supervisord's importlib.metadata path).
+# We pip-install supervisor under python3.11 below so it shares the same
+# interpreter and packages as boilingsim, avoiding the 3.10/3.11 split.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         software-properties-common ca-certificates curl tzdata \
@@ -85,7 +91,7 @@ RUN apt-get update \
         python3.11 python3.11-venv python3.11-dev python3-pip \
         build-essential git \
         libhdf5-dev libgl1 libglib2.0-0 \
-        nginx supervisor \
+        nginx \
     && rm -rf /var/lib/apt/lists/*
 
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
@@ -94,9 +100,12 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
 WORKDIR /app
 
 # Python deps in their own layer so source changes don't invalidate.
+# `supervisor` is installed here (not apt) so it runs under the same
+# Python 3.11 as boilingsim — see comment above the apt block for why.
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
     && pip install --no-cache-dir \
+        supervisor \
         "warp-lang[examples]" \
         numpy scipy matplotlib h5py pyvista trimesh pygmsh meshio \
         usd-core fastapi "uvicorn[standard]" websockets zstandard msgpack \
@@ -119,7 +128,12 @@ COPY --from=web_build /app/web/dist /usr/share/nginx/html
 COPY runpod/nginx.runpod.conf /etc/nginx/sites-available/default
 RUN rm -f /etc/nginx/sites-enabled/default \
     && ln -s /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
-COPY runpod/supervisord.conf /etc/supervisor/conf.d/boilingsim.conf
+# Self-contained supervisord main config (program defs + supervisord
+# core sections). Goes at the path the CMD references. We removed
+# apt's supervisor entirely (see apt block) so no /etc/supervisor/conf.d
+# include chain is needed.
+RUN mkdir -p /etc/supervisor /var/log/supervisor
+COPY runpod/supervisord.conf /etc/supervisor/supervisord.conf
 
 # Precheck script (shared with the per-service Dockerfile.solver path).
 COPY scripts/dashboard_precheck.sh /usr/local/bin/dashboard_precheck
@@ -172,4 +186,7 @@ EXPOSE 80
 
 # supervisord runs nginx + ws-server + dashboard_precheck in the right order.
 # -n keeps it in the foreground so Docker sees it as PID 1.
-CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]
+# We use the pip-installed supervisord under /usr/local/bin (Python 3.11)
+# rather than apt's /usr/bin/supervisord (Python 3.10) — see the apt-get
+# block above for the reason.
+CMD ["/usr/local/bin/supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]
