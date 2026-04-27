@@ -35,9 +35,11 @@ import { MeshTransmissionMaterial, RoundedBox, Text } from "@react-three/drei";
 
 import type { Snapshot } from "../types/snapshot";
 
-// Upper end of the heat-flux slider (50 kW/m^2 matches ControlPanel).
+// Upper end of the heat-flux slider (80 kW/m^2 matches ControlPanel).
+// 80 kW/m^2 over the 20 cm pot base is ~2.5 kW -- top of the residential
+// burner range (induction "fast boil" / electric coil at high).
 // Above this, the visual saturates rather than clipping.
-const MAX_FLUX_W_M2 = 50_000;
+const MAX_FLUX_W_M2 = 80_000;
 
 // Cabinet center in world XY. The active burner sits at world
 // origin; this offset places that burner at the cooktop's

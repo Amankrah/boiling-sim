@@ -1,6 +1,12 @@
-# Copper pot (Milestone D validation) — identical geometry to default.yaml
-# but with a copper bottom/walls. Copper has ~25x the thermal conductivity
-# of stainless steel, so the wall is nearly isothermal in steady state.
+# Copper pot, real-world household cooking. Material variant of default.yaml.
+# Same geometry, ambient, fill, and burner power; only the pot material differs.
+# Copper's very high k (~401 W/m-K, ~25x steel) makes the wall nearly
+# isothermal in steady state -- closest to "lumped capacitance" behaviour of
+# the three materials.
+#
+# This config supersedes the Phase-2 sub-saturation ONB validation case
+# (q=30 kW/m^2, boiling off). Phase-2 benchmark numbers are obsolete after the
+# realworld-refresh -- see benchmarks/phase2_heating.md.
 pot:
   diameter_m: 0.20
   height_m: 0.12
@@ -19,7 +25,7 @@ carrot:
   initial_beta_carotene_mg_per_100g: 8.3
 
 heating:
-  base_heat_flux_w_per_m2: 30000.0
+  base_heat_flux_w_per_m2: 80000.0  # ~2.5 kW residential boil setting
   ambient_temp_c: 22.0
 
 grid:
@@ -36,7 +42,7 @@ solver:
   h_conv_outer_w_per_m2_k: 10.0
 
 boiling:
-  enabled: false
+  enabled: true                     # nucleate boiling on -- real cooking
   dT_onb_k: 5.0
   contact_angle_rad: 1.0
   max_bubbles: 100000
@@ -54,5 +60,5 @@ nutrient:
   C0_mg_per_kg: 83.0
   C_water_sat_mg_per_kg: 6.0e-3     # aqueous solubility at ~100 C
 
-total_time_s: 600.0
+total_time_s: 900.0  # 15 min: boil-up + steady boil
 output_every_s: 0.1

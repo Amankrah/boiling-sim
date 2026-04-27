@@ -1,4 +1,12 @@
-# Default scenario: 20cm stainless steel pot, 25mm carrot, 10-minute boil
+# Default scenario: real-world household cooking on a steel 304 saucepan.
+# 20 cm dia x 12 cm tall (~3-quart), 2.5 L water, ~2.5 kW residential burner
+# (80 kW/m^2 over the pot base), nucleate boiling enabled, 15-minute window
+# (boil-up reached ~6-8 min, then steady boil for ~7 min).
+#
+# This config supersedes the prior Phase-2 sub-saturation ONB validation case
+# (q=30 kW/m^2, boiling off, 600 s). Phase-2 benchmark numbers in
+# benchmarks/phase2_heating.md and benchmarks/runs.md are obsolete after this
+# refresh -- see the realworld-refresh commit for replacements.
 pot:
   diameter_m: 0.20
   height_m: 0.12
@@ -17,7 +25,7 @@ carrot:
   initial_beta_carotene_mg_per_100g: 8.3
 
 heating:
-  base_heat_flux_w_per_m2: 30000.0  # ~1000 W on a 20 cm base
+  base_heat_flux_w_per_m2: 80000.0  # ~2.5 kW on a 20 cm base -- residential "boil water" setting
   ambient_temp_c: 22.0
 
 grid:
@@ -36,7 +44,7 @@ solver:
   h_conv_outer_w_per_m2_k: 10.0    # Newton cooling coefficient on outer pot wall
 
 boiling:
-  enabled: false                   # Phase 3: set true to activate the bubble pool
+  enabled: true                    # real cooking has nucleate boiling once the wall crosses T_sat
   dT_onb_k: 5.0                    # wall superheat threshold for nucleation onset
   contact_angle_rad: 1.0           # water on steel ≈ 0.7–1.4 rad
   max_bubbles: 100000              # 100k for dev (dx=2mm), 1M for production (dx=0.5mm)
@@ -54,5 +62,5 @@ nutrient:
   C0_mg_per_kg: 83.0               # initial beta-carotene loading (mg / kg carrot)
   C_water_sat_mg_per_kg: 6.0e-3    # aqueous solubility of beta-carotene at ~100 C (~6 ug/L)
 
-total_time_s: 600.0
+total_time_s: 900.0  # 15 min: boil-up ~6-8 min + steady boil ~7 min
 output_every_s: 0.1

@@ -83,7 +83,7 @@ class ScalarHistory:
 # ---------------------------------------------------------------------------
 
 SCALAR_CSV_FIELDS: tuple[str, ...] = (
-    "t", "dt",
+    "t", "dt", "step",
     "T_mean_water_c", "T_max_water_c", "T_min_water_c",
     "T_max_wall_c", "T_inner_wall_mean_c", "T_inner_wall_max_c",
     "u_max_mps",

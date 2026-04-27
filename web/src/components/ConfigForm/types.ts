@@ -199,7 +199,7 @@ export const DEFAULT_DRAFT: ScenarioDraft = {
     initial_beta_carotene_mg_per_100g: 8.3,
   },
   heating: {
-    base_heat_flux_w_per_m2: 30000.0,
+    base_heat_flux_w_per_m2: 80000.0,
     ambient_temp_c: 22.0,
   },
   initial_conditions: {

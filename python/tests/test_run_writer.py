@@ -37,12 +37,15 @@ def _make_sample(
     degraded: float = 1.0,
     precip: float = 0.0,
     t_water: float = 99.9,
+    step: int = 0,
 ) -> ScalarSample:
-    # ScalarSample has no `step` field (step-count lives on the
-    # Simulation, not on individual samples); sample `t` is the
-    # monotonic identifier.
+    # `step` is the sim-step counter at the moment the sample was
+    # captured (Simulation.step_count). Defaults to 0 here so existing
+    # call sites in this test module don't need to pass it; the new
+    # test_step_count_propagates_to_summary test passes a non-zero
+    # value to verify the JSON summary picks it up.
     return ScalarSample(
-        t=t, dt=0.001,
+        t=t, dt=0.001, step=step,
         T_mean_water_c=t_water, T_max_water_c=t_water + 0.5, T_min_water_c=t_water - 0.5,
         T_max_wall_c=107.0, T_inner_wall_mean_c=106.5, T_inner_wall_max_c=107.2,
         u_max_mps=0.1,
@@ -182,6 +185,32 @@ def test_summary_json_has_final_state_block(beta_carotene_cfg, tmp_path: Path):
     assert "retention_pct" in final
     assert "T_water_mean_c" in final
     assert final["T_water_mean_c"] == pytest.approx(99.9, abs=1e-6)
+
+
+def test_step_count_propagates_to_summary(beta_carotene_cfg, tmp_path: Path):
+    """Phase 6.8: ScalarSample carries the sim's step counter, and
+    write_run_artefacts pulls it into the JSON summary's `step_count`
+    field. Before this fix, the writer used getattr(samples[-1], "step",
+    0) on a ScalarSample that lacked a `step` attribute, so the field
+    was always reported as 0 even after a 250k-step run.
+    """
+    h = ScalarHistory(target_duration_s=60.0)
+    last_step = 0
+    for i in range(15):
+        # Deliberately monotonic-but-uneven steps -- mirrors the real
+        # advection-CFL pattern where dt varies per step. We assert the
+        # JSON summary picks up the FINAL sample's step value, not zero.
+        last_step = i * 1000 + 7
+        h.append(_make_sample(t=i * 40.0, t_water=99.9, step=last_step))
+    _, _, json_path = write_run_artefacts(
+        h, beta_carotene_cfg, run_id="step-test", out_dir=tmp_path,
+        wall_clock_s=600.0, nutrient_primary_name="β-carotene",
+    )
+    summary = _read_json(json_path)
+    assert summary["step_count"] == last_step, (
+        f"summary['step_count'] = {summary['step_count']} but expected "
+        f"{last_step} (the last ScalarSample's step field)"
+    )
 
 
 def test_summary_json_acceptance_gates_beta_carotene(beta_carotene_cfg, tmp_path: Path):

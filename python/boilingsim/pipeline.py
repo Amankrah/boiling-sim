@@ -44,6 +44,12 @@ from .thermal import (
 class ScalarSample:
     t: float
     dt: float
+    # Sim step counter at the moment this sample was captured. Independent
+    # of `t` because dt varies per step (advection-CFL bound). Drivers like
+    # run_dashboard.py and the run-summary writer use this for the STEPS
+    # field on the Results page; offline HDF5 readers can use it to align
+    # samples with kernel-launch indices for performance analysis.
+    step: int
     T_mean_water_c: float
     T_max_water_c: float
     T_min_water_c: float
@@ -377,6 +383,7 @@ class Simulation:
         return ScalarSample(
             t=self.t,
             dt=dt_last,
+            step=self.step_count,
             T_mean_water_c=float(T_w.mean() - 273.15),
             T_max_water_c=float(T_w.max() - 273.15),
             T_min_water_c=float(T_w.min() - 273.15),
@@ -498,6 +505,7 @@ class Simulation:
                 g = f.create_group("scalars")
                 g.create_dataset("t", data=np.array([s.t for s in scalars]))
                 g.create_dataset("dt", data=np.array([s.dt for s in scalars]))
+                g.create_dataset("step", data=np.array([s.step for s in scalars]))
                 g.create_dataset("T_mean_water_c", data=np.array([s.T_mean_water_c for s in scalars]))
                 g.create_dataset("T_max_water_c", data=np.array([s.T_max_water_c for s in scalars]))
                 g.create_dataset("T_min_water_c", data=np.array([s.T_min_water_c for s in scalars]))

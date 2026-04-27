@@ -26,7 +26,7 @@ def test_default_yaml_loads():
     assert cfg.pot.diameter_m == 0.20
     assert cfg.water.fill_fraction == 0.75
     assert cfg.carrot.diameter_m == 0.025
-    assert cfg.total_time_s == 600.0
+    assert cfg.total_time_s == 900.0
 
 
 def test_defaults_valid():

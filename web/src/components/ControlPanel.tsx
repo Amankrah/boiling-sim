@@ -73,7 +73,7 @@ export function ControlPanel({
             <Slider
               value={Math.round(heatFluxKw)}
               min={0}
-              max={50}
+              max={80}
               step={1}
               onChange={commitHeatFlux}
               ariaLabel="wall heat flux in kilowatts per square metre"

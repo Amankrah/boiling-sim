@@ -66,7 +66,7 @@ def test_default_config_loads():
     assert path.exists()
     cfg = yaml.safe_load(path.read_text())
     assert cfg["pot"]["material"] == "steel_304"
-    assert cfg["total_time_s"] == 600.0
+    assert cfg["total_time_s"] == 900.0
 
 
 def test_numpy_scipy_available():
