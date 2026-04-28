@@ -3,10 +3,10 @@
 # (80 kW/m^2 over the pot base), nucleate boiling enabled, 15-minute window
 # (boil-up reached ~6-8 min, then steady boil for ~7 min).
 #
-# This config supersedes the prior Phase-2 sub-saturation ONB validation case
-# (q=30 kW/m^2, boiling off, 600 s). Phase-2 benchmark numbers in
-# benchmarks/phase2_heating.md and benchmarks/runs.md are obsolete after this
-# refresh -- see the realworld-refresh commit for replacements.
+# Phase 3, 4, 6 (run_boiling.py / run_retention.py / run_dashboard.py) consume
+# this config as-is (boiling.enabled honoured). Phase 2 (run_heating.py)
+# overrides cfg.boiling.enabled = False so the single-phase reference remains
+# apples-to-apples with the lumped-capacitance ODE.
 pot:
   diameter_m: 0.20
   height_m: 0.12

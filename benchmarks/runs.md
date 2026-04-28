@@ -87,7 +87,7 @@ python scripts/run_boiling.py \
     --max-bubbles 100000
 ```
 
-Output: `phase3_boiling_steel_304.{h5,png}` — temperature + bubble-count + departure-diameter histogram. Rohsenow ratio 1.01×, mean D_d = 2.93 mm.
+Output: `phase3_boiling_steel_304.{h5,png}` — temperature + bubble-count + departure-diameter histogram. Rohsenow ratio 1.04×, mean D_d = 2.93 mm (post-realworld-refresh q = 80 kW/m²; original q = 30 calibration was 1.01× and is preserved in the Phase 3.2 q-sweep).
 
 ### aluminum
 
@@ -98,7 +98,7 @@ python scripts/run_boiling.py \
     --max-bubbles 100000
 ```
 
-Output: `phase3_boiling_aluminum.{h5,png}`. Rohsenow ratio 0.99×.
+Output: `phase3_boiling_aluminum.{h5,png}`. Rohsenow ratio 0.92× at q = 80 kW/m² (was 0.99× at q = 30 calibration).
 
 ### copper
 
@@ -109,7 +109,7 @@ python scripts/run_boiling.py \
     --max-bubbles 100000
 ```
 
-Output: `phase3_boiling_copper.{h5,png}`. Rohsenow ratio 0.97×.
+Output: `phase3_boiling_copper.{h5,png}`. Rohsenow ratio 0.92× at q = 80 kW/m² (was 0.97× at q = 30 calibration).
 
 ---
 
@@ -468,9 +468,9 @@ python scripts/run_retention.py \
 | 2 | phase2_heating_steel_304_impl | default.yaml | ODE err −7.97 % at ONB |
 | 2 | phase2_heating_aluminum_impl | aluminum.yaml | ODE err −6.64 % at ONB |
 | 2 | phase2_heating_copper_impl | copper.yaml | ODE err −7.11 % at ONB |
-| 3 | phase3_boiling_steel_304 | default.yaml | Rohsenow 1.01× |
-| 3 | phase3_boiling_aluminum | aluminum.yaml | Rohsenow 0.99× |
-| 3 | phase3_boiling_copper | copper.yaml | Rohsenow 0.97× |
+| 3 | phase3_boiling_steel_304 | default.yaml | Rohsenow 1.04× (q = 80) |
+| 3 | phase3_boiling_aluminum | aluminum.yaml | Rohsenow 0.92× (q = 80) |
+| 3 | phase3_boiling_copper | copper.yaml | Rohsenow 0.92× (q = 80) |
 | 3.2 | phase3_boiling_q_sweep_q10 | boiling_q10.yaml | ratio 1.97× |
 | 3.2 | phase3_boiling_q_sweep_q20 | boiling_q20.yaml | ratio 1.25× |
 | 3.2 | phase3_boiling_q_sweep_q30 | default.yaml | ratio 1.03× |

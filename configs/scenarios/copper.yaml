@@ -4,9 +4,8 @@
 # isothermal in steady state -- closest to "lumped capacitance" behaviour of
 # the three materials.
 #
-# This config supersedes the Phase-2 sub-saturation ONB validation case
-# (q=30 kW/m^2, boiling off). Phase-2 benchmark numbers are obsolete after the
-# realworld-refresh -- see benchmarks/phase2_heating.md.
+# Used by Phase-3 boiling validation as-is. Phase-2 single-phase heating is
+# produced by run_heating.py, which forces cfg.boiling.enabled = False.
 pot:
   diameter_m: 0.20
   height_m: 0.12
