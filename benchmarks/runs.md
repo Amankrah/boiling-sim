@@ -17,9 +17,11 @@ All run times quoted below are RTX 4090 at `dx = 2 mm`. Production-tier `dx = 1 
 
 Validates the conjugate heat-transfer solver + natural-convection plume against a lumped-capacitance ODE reference on three pot materials. See [phase2_heating.md](phase2_heating.md) for the acceptance matrix.
 
+The post-realworld-refresh `default.yaml` / `aluminum.yaml` / `copper.yaml` configs all default to `boiling.enabled: true` (real-cooking scenarios shared with Phase 3, Phase 4, and the live dashboard). For Phase-2 single-phase validation `scripts/run_heating.py` overrides `cfg.boiling.enabled = False` so the sim represents the same physics regime as the lumped reference. The lumped ODE pins T at T_sat dynamically once it would have boiled.
+
 ### steel 304 (reference material)
 
-Implicit backward-Euler thermal conduction, natural convection active, boiling disabled.
+Implicit backward-Euler thermal conduction, natural convection active, boiling kernel forced off by the driver.
 
 ```bash
 python scripts/run_heating.py \
@@ -28,7 +30,7 @@ python scripts/run_heating.py \
     --suffix _impl
 ```
 
-Output: `phase2_heating_steel_304_impl_dx2mm.{h5,png}` — temperature trajectory, max-wall + peak convection velocity.
+Output: `phase2_heating_steel_304_impl.{h5,png}` — temperature trajectory (with t_ONB validity-window annotation), max-wall + peak convection velocity.
 
 ### aluminum
 
@@ -39,7 +41,7 @@ python scripts/run_heating.py \
     --suffix _impl
 ```
 
-Output: `phase2_heating_aluminum_impl_dx2mm.{h5,png}`.
+Output: `phase2_heating_aluminum_impl.{h5,png}`.
 
 ### copper
 
@@ -50,17 +52,7 @@ python scripts/run_heating.py \
     --suffix _impl
 ```
 
-Output: `phase2_heating_copper_impl_dx2mm.{h5,png}`.
-
-### Diagnostic reanalysis — ONB-annotated plots
-
-After the three heating runs complete, overlay the onset-of-nucleate-boiling cross-over (T_wall_max first reaches 105 °C) on the lumped-ODE trajectory comparison.
-
-```bash
-python scripts/reanalyze_heating_onb.py
-```
-
-Output: `phase2_heating_{steel_304,aluminum,copper}_onb.png` + `phase2_heating_onb_summary.md`.
+Output: `phase2_heating_copper_impl.{h5,png}`.
 
 ### Diagnostic — radial T-profile sanity check
 
@@ -399,7 +391,6 @@ for mat in default aluminum copper; do
         --dx-mm 2.0 --pressure-iters 100 \
         --suffix _impl
 done
-python scripts/reanalyze_heating_onb.py
 python scripts/debug_radial_T_profile.py
 python scripts/debug_convection_plume.py
 
@@ -474,9 +465,9 @@ python scripts/run_retention.py \
 
 | phase | artefact | scenario | R / ratio |
 |---|---|---|---:|
-| 2 | phase2_heating_steel_304_impl_dx2mm | default.yaml | ODE err +12.4 % at ONB |
-| 2 | phase2_heating_aluminum_impl_dx2mm | aluminum.yaml | ODE err −10.7 % |
-| 2 | phase2_heating_copper_impl_dx2mm | copper.yaml | ODE err −29.9 % |
+| 2 | phase2_heating_steel_304_impl | default.yaml | ODE err −7.97 % at ONB |
+| 2 | phase2_heating_aluminum_impl | aluminum.yaml | ODE err −6.64 % at ONB |
+| 2 | phase2_heating_copper_impl | copper.yaml | ODE err −7.11 % at ONB |
 | 3 | phase3_boiling_steel_304 | default.yaml | Rohsenow 1.01× |
 | 3 | phase3_boiling_aluminum | aluminum.yaml | Rohsenow 0.99× |
 | 3 | phase3_boiling_copper | copper.yaml | Rohsenow 0.97× |

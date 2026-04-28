@@ -8,10 +8,19 @@ Results compared at the **onset of nucleate boiling (ONB)** — the point where
 Phase 2's sensible-heating physics stops being valid and the lumped ODE
 breaks down too.
 
-**All three materials match the ODE within 10–30% at ONB, with the sign and
-magnitude of the discrepancy consistent with the well-known limitation of the
-one-body lumped model** (uniform T assumption misses wall-water gradients
-that depend on pot conductivity).
+**All three materials match the ODE within ±8 % at ONB**, in a tight
+same-sign band (sim slightly slower than lumped). The residual is consistent
+with finite conjugate-conduction HTC at the inner-wall face (sim) vs the
+"instant mixing" idealisation of the one-body lumped model.
+
+The post-realworld-refresh `default.yaml` / `aluminum.yaml` / `copper.yaml`
+configs all default to `boiling.enabled: true` (real-cooking scenarios used by
+Phase 3/4 drivers and the live dashboard). For Phase-2 single-phase validation
+`scripts/run_heating.py` overrides `cfg.boiling.enabled = False` so the
+sim represents the same physics regime as the lumped reference. The lumped
+ODE itself was upgraded to dynamically pin water at T_sat once it would have
+boiled, replacing a tiny constant evaporation term (236 W) that previously let
+the reference run away to ~189 °C.
 
 ## System
 
@@ -27,37 +36,51 @@ that depend on pot conductivity).
 
 ## Results at ONB (T_wall_max first crosses 105 °C)
 
-See **Figures 1–3** (`phase2_heating_{steel_304,aluminum,copper}_impl_dx2mm.png`)
-for the annotated trajectories. The sim tracks lumped through the sensible-heating
-regime and diverges past ONB as expected.
+See **Figures 1–3** (`phase2_heating_{steel_304,aluminum,copper}_impl.png`)
+for the annotated trajectories. The Phase-2 valid window is [0, t_ONB]; past
+that the lumped curve pins at T_sat (correct boiling behaviour) while the sim
+keeps heating both the water and the wall (no boiling cap when
+`boiling.enabled = False`). Both the validity window and the post-ONB
+divergence are explicitly annotated on each plot.
+
+Stove flux: `base_heat_flux_w_per_m2 = 80 000` (post-realworld-refresh
+`default.yaml`), giving `P_stove ≈ 2 513 W` over the pot base.
 
 | Material | t_ONB (s) | T_water sim | T_water lumped | Error | T_wall_max final |
 |---|---:|---:|---:|---:|---:|
-| steel_304 | 213.5 | 41.0 °C | 36.5 °C | **+12.4 %** | 148.9 °C |
-| aluminum  | 510.7 | 54.3 °C | 60.8 °C | **−10.7 %** | 120.6 °C |
-| copper    | 885.8 | 61.3 °C | 87.4 °C | **−29.9 %** | 110.7 °C |
+| steel_304 | 21.0 | 22.42 °C | 24.36 °C | **−7.97 %** | 271.8 °C |
+| aluminum  | 14.6 | 21.64 °C | 23.18 °C | **−6.64 %** | 215.1 °C |
+| copper    | 25.2 | 23.52 °C | 25.32 °C | **−7.11 %** | 193.7 °C |
 
 ### Interpretation
 
-The sign and magnitude of the error tell a consistent physics story:
+All three materials sit in a tight **−7 to −8 % band**, same sign (sim
+slightly slower than lumped at ONB). The residual is the cost of finite
+conjugate-conduction HTC at the inner-wall face, which the lumped's "instant
+mixing" idealisation cannot model: in the sim the water near the wall warms
+first and convects upward, leaving the bulk-mean T marginally below the
+isothermal-blob prediction. The error is a small fixed offset, not a
+k-dependent divergence.
 
-- **Steel (+12%)**: low k → steep wall temperature gradient. Sim's wall is
-  much hotter than the water (148 °C vs 82 °C at run end, a 66 K gap), so
-  a lot of the stove energy sits in the wall rather than the water. The sim
-  water mean *leads* the ODE at ONB because the ODE attributes all of the
-  energy in the (hot) wall to the bulk system at one uniform T.
+The t_ONB ordering is physically sensible — fast for low-ρcp pots and slow
+for high-k pots that spread heat away from the stove hot-spot:
 
-- **Aluminum (−11%)**: very high k, low pot mass. Wall stays close to water
-  temperature (120 vs 70 °C at ONB, a 50 K gap). The sim captures the real
-  convective lag between the wall and the bulk water, so sim water *lags*
-  the uniform-T ODE slightly.
+- **Aluminum (t_ONB = 14.6 s)**: lowest pot ρcp (2.4 MJ/m³·K) and modest k
+  (≈237). Local hot-spot at the base races to 105 °C fastest.
+- **Steel (t_ONB = 21.0 s)**: low k (≈16) but highest ρcp (4.0 MJ/m³·K). Heat
+  builds up locally at the stove face but the high heat capacity blunts the
+  temperature rise.
+- **Copper (t_ONB = 25.2 s)**: highest k (≈400) plus high ρcp (3.4 MJ/m³·K).
+  The conductivity spreads heat across the entire wall, so the peak
+  temperature anywhere on the wall climbs slowly — copper's nearly-isothermal
+  wall is the slowest to reach the ONB threshold.
 
-- **Copper (−30%)**: highest k. Wall hardly gets ahead of the water. By the
-  time the wall reaches 105 °C (t=886 s) the water is only 61 °C, whereas the
-  uniform-T ODE says the whole system should be at 87 °C at that moment. The
-  sim is more physically realistic here: copper's near-isothermal wall means
-  the wall never really runs hot enough to enter boiling until much later
-  than the lumped prediction.
+Past ONB, the sim curves run away (T_water → 108 / 88 / 82 °C, T_wall_max
+→ 272 / 215 / 194 °C for steel / aluminum / copper) because Phase-2 has no
+phase-change cap. The lumped pins at T_sat = 100 °C from the moment evap
+balances stove input. The post-ONB divergence is expected and **not an
+acceptance criterion** — Phase 3 reintroduces nucleate boiling and the same
+configs (with boiling-on) clamp wall and water at the saturation regime.
 
 ## Performance — before vs after implicit conduction
 
@@ -93,48 +116,85 @@ materials-property accident of the pot choice.
 To confirm the conjugate-interface heat transfer is behaving correctly (not
 an artifact of the harmonic-mean ``k_face`` under-predicting heat transfer
 across a strong-contrast interface like copper↔water), the sim was probed
-at ``z = mid-water`` for all three materials at t = 300 s.
+at ``z = mid-water`` for all three materials at t = 300 s on the current
+post-realworld-refresh runs (q_base = 80 kW/m², boiling kernel disabled).
 
-See **Figures 4–6** (`phase2_radial_T_{material}.png`). Key observations:
+See **Figures 4–6** (`phase2_radial_T_{material}.png`). At dx = 2 mm the
+3 mm wall is resolved by 2 cells, with an explicit ambient-air sanity-check
+sample taken just outside r_outer to confirm the wall labelling.
 
-- **Copper** (Fig 6): wall is **near-isothermal at ~53 °C** across its 3 mm
-  thickness — exactly as expected for k = 401 W/(m·K). The T drop from
-  water-core (40 °C) to wall (53 °C) happens over a ~3 mm **water-side
-  boundary layer**, not inside the wall. This confirms there is no numerical
-  artifact at the water↔copper interface; the ONB-gap is genuine physics,
-  not a harmonic-mean under-prediction.
-- **Aluminum** (Fig 5): same story at 54 °C. k = 237 gives an essentially
-  flat wall profile at this resolution (dx = 2 mm barely resolves the 3 mm
-  wall, so any intra-wall gradient is smaller than the grid can see).
-- **Steel** (Fig 4): wall at 50.8 °C, again near-isothermal at this probe
-  height. Steel's wall gradients are only visible near the stove base where
-  the stove flux enters; past that, convection mixes the wall T nicely.
+| Material | T_water_core | T_water_BL | T_inner_wall | T_outer_wall | ΔT_wall |
+|---|---:|---:|---:|---:|---:|
+| steel_304 | 41.0 °C | 91.3 °C | 83.15 °C | 82.86 °C | +0.29 K |
+| aluminum  | 39.7 °C | 86.1 °C | 96.17 °C | 96.20 °C | −0.03 K |
+| copper    | 37.6 °C | 72.6 °C | 96.81 °C | 96.85 °C | −0.03 K |
 
-The radial profile confirms that for all three materials the sim captures
-the physical feature that drives the ONB discrepancy: heat transfer is
-**water-boundary-layer-limited**, not pot-conductivity-limited. The lumped
-ODE misses this entirely, which is why its error grows with increasing k.
+Key observations:
+
+- **All three walls are isothermal** (|ΔT| < 0.3 K, well below the ~3 K
+  resolution of a 2-cell wall at this flux). With dx = 2 mm vs a 3 mm wall,
+  any intra-wall gradient smaller than ~0.5 K · cell⁻¹ is below the grid's
+  ability to resolve — and the data sits comfortably inside that floor.
+  No harmonic-mean `k_face` under-prediction at the water↔copper interface.
+- **Steel's wall is cooler (83 °C) than aluminum's or copper's (96 °C)**.
+  With steel's low k = 16 the wall heats up locally where the stove flux
+  enters but conducts only slowly *upward* along the pot side, so at this
+  probe height (z ≈ 48 mm above the base) the wall hasn't yet reached
+  T_sat. Aluminum (k = 237) and copper (k = 401) push the entire wall to
+  near-saturation by t = 300 s — heat distributes axially as fast as it
+  enters radially.
+- **Water-side gradient dominates**: in every case the temperature drop
+  from inner wall to bulk water core is 40–60 K, occurring across ~3 mm
+  of water-side boundary layer, while the drop across the metal wall is
+  effectively zero. Heat transfer is **water-boundary-layer-limited**, not
+  pot-conductivity-limited.
+
+The radial profile confirms the sim captures the physical feature that
+drives the lumped-ODE residual: the lumped's "instant pot↔water mixing"
+assumption ignores the water-side BL entirely. The residual error sits at
+a uniform −7 to −8 % across all three materials (no k-dependence), exactly
+the signature of a missing finite-HTC term that's the same regardless of
+pot conductivity — because the bottleneck is on the water side, not in
+the wall.
 
 ## Artefacts
 
-- `benchmarks/phase2_heating_{material}_impl_dx2mm.h5` — raw HDF5 time series (implicit)
-- **Figures 1–3**: `phase2_heating_{material}_impl_dx2mm.png` — sim vs lumped
-  trajectory, max-wall trajectory, peak convection velocity
+- `benchmarks/phase2_heating_{material}_impl.h5` — raw HDF5 time series (implicit)
+- **Figures 1–3**: `phase2_heating_{material}_impl.png` — sim vs lumped
+  trajectory (with t_ONB validity-window annotation), max-wall trajectory
+  (with T_ONB threshold line), peak convection velocity
 - **Figures 4–6**: `phase2_radial_T_{material}.png` — radial T profile at
   mid-water showing wall-BL-air structure
-- `phase2_heating_{material}_onb.png` — ONB-annotated plots from the
-  reanalysis (earlier explicit HDF5s, preserved for before/after comparison)
 - `phase2_convection_plume.png` — Milestone C convection smoke test
-- `phase2_heating_onb_summary.md` — compact ONB table (explicit results)
 
 ## Convection
 
 All three simulations develop a rising convection plume within the first
-~30 seconds, with peak velocities settling at 40–65 mm/s — consistent with
-natural-convection literature for water in a stove-heated pot. The
-steel-pot run reached |u|_max = 77 mm/s near the end due to rapid vapor
-pressure rise that Phase 2 doesn't fully model; Phase 3 will replace this
-with actual bubble physics.
+~30 seconds. With the boiling kernel forced off, peak velocities settle in
+a steady **80–100 mm/s** band across all three materials — single-phase
+natural-convection driven by the 80 kW/m² stove flux through a wall-water
+ΔT of order 100 K. Brief excursions to ~120 mm/s late in the run reflect
+plume detachment and reattachment cycles in the bulk-water cell; there is
+no longer any vapor-related velocity spike (none of the bubble or
+microlayer kernels fire in this configuration).
+
+| Material | u_max early (t≈30 s) | u_max settled | u_max peak |
+|---|---:|---:|---:|
+| steel_304 | ~56 mm/s | ~90 mm/s | ~120 mm/s |
+| aluminum | ~56 mm/s | ~85 mm/s | ~103 mm/s |
+| copper | ~52 mm/s | ~80 mm/s | ~96 mm/s |
+
+The order-of-magnitude estimate from a Boussinesq buoyancy scaling
+(`u ~ √(g·β·ΔT·L)` with L = water column height ≈ 90 mm, ΔT ≈ 100 K) is
+~140 mm/s, consistent with the simulated peaks. The smaller settled
+velocity reflects viscous + advection-CFL damping at dx = 2 mm.
+
+A separate smoke test (`scripts/debug_convection_plume.py`,
+`phase2_convection_plume.png`) verifies buoyancy itself in a 64×64×96 mm
+water-only box with a localised hot spot — the plume reaches ~22 mm/s
+peak vertical velocity in 4 simulated seconds, confirming
+`apply_buoyancy_step` + `pressure_projection` produce the expected
+upflow without any pot/wall geometry.
 
 ## Acceptance (plan §2.8, as revised)
 
@@ -142,9 +202,13 @@ with actual bubble physics.
 - [x] Natural convection plume visible, velocities physically reasonable
 - [x] **Implicit thermal conduction** — Δt decoupled from α_solid
 - [x] Wall time ≤ 1 s/sim-s at dx = 2 mm for all three materials
-- [x] ONB-capped validation: agreement with lumped ODE within 30% (steel +12%, Al −11%, Cu −30%)
-- [x] Sign and magnitude of the residual errors consistent with lumped-model limitations
-- [x] Qualitative material ordering reproduced
+- [x] ONB-capped validation: agreement with lumped ODE within ±10 %
+      (steel −7.97 %, Al −6.64 %, Cu −7.11 %)
+- [x] Same-sign residual across all three materials, consistent with finite
+      conjugate-conduction HTC vs lumped's instant-mixing idealisation
+- [x] Qualitative material ordering reproduced (low-ρcp aluminum reaches
+      ONB fastest; high-k copper slowest because heat spreads off the
+      stove hot-spot)
 
 ## Known Limitations (to address in later phases)
 
@@ -186,11 +250,12 @@ diffusivity. This matters directly for Phase 3 in three concrete ways:
 
 ## Remaining polish (optional, before or during Phase 3)
 
-- **1-D radial conduction reference.** The current lumped-capacitance ODE
-  undercounts heat transfer for high-k pots because it assumes uniform T.
-  A spatially-resolved 1-D radial conduction ODE — water core, BL, wall,
-  air — would bring aluminum and copper inside ~5 % agreement and make
-  the paper-ready validation story tight. Estimated 1-2 days of work.
+- **Tighter lumped reference (≤ 5 % band).** Current ONB-window agreement
+  sits at a uniform −7 to −8 %. A two-body lumped (separate water and pot
+  capacities with a finite UA between them) would absorb most of that
+  residual without the cost of a full 1-D radial conduction ODE — the
+  lumped's surviving inaccuracy is the "instant pot↔water mixing"
+  assumption, not anything k-dependent. Estimated half-day of work.
 
 - **Press-check at dx = 1 mm.** All of Phase 2 ran at dx = 2 mm (dev tier).
   A single validation run at dx = 1 mm (plan's production tier) for steel

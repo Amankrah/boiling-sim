@@ -29,6 +29,35 @@ from boilingsim.pipeline import Simulation  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
+# Phase-2 validity window
+# ---------------------------------------------------------------------------
+#
+# Phase-2 (sensible heating + natural convection, no boiling) is only physically
+# valid until the wall would have nucleated bubbles in real life. Past
+# T_wall = T_sat + dT_ONB ≈ 105 °C, the lumped reference is also invalid (real
+# water would boil and clamp at T_sat). So all sim-vs-lumped comparison numbers
+# below are reported in two groups: (a) the meaningful "at t_ONB" snapshot, and
+# (b) post-ONB diagnostic metrics that are NOT acceptance criteria.
+
+T_ONB_C = 105.0
+
+
+def find_first_crossing(t: np.ndarray, y: np.ndarray, threshold: float) -> float | None:
+    """Linearly interpolate the first t where y(t) crosses `threshold`."""
+    above = y >= threshold
+    if not above.any():
+        return None
+    idx = int(np.argmax(above))
+    if idx == 0:
+        return float(t[0])
+    y0, y1 = y[idx - 1], y[idx]
+    t0, t1 = t[idx - 1], t[idx]
+    if y1 == y0:
+        return float(t[idx])
+    return float(t0 + (threshold - y0) / (y1 - y0) * (t1 - t0))
+
+
+# ---------------------------------------------------------------------------
 # Lumped-capacitance reference
 # ---------------------------------------------------------------------------
 
@@ -91,18 +120,45 @@ def lumped_capacitance_ode(cfg: ScenarioConfig) -> dict:
     T_sat_k = 100.0 + 273.15
 
     # ODE: dT/dt = (P_stove - h·A_ext·(T-T_amb) - P_evap(T)) / C_sys
+    # Saturation handling: at T >= T_sat the water physically cannot exceed
+    # 100 °C at atmospheric pressure — all surplus net power must go into
+    # evaporation (mass loss, not temperature rise). We enforce this by
+    # *dynamically* raising P_evap to absorb whatever (P_stove - Q_loss) is
+    # currently available, so dT/dt collapses to 0 at saturation.
     def rhs(_t, y):
         T = y[0]
         Q_loss = h_conv * A_ext * (T - T_amb_k)
+        P_net_in = P_stove - Q_loss
         frac = max(0.0, min(1.0, (T - T_onset_k) / (T_sat_k - T_onset_k)))
         P_evap = P_evap_max * frac
-        return [(P_stove - Q_loss - P_evap) / C_sys]
+        if T >= T_sat_k:
+            P_evap = max(P_evap, P_net_in)
+        return [(P_net_in - P_evap) / C_sys]
 
     T0 = cfg.water.initial_temp_c + 273.15
     t_max = cfg.total_time_s
-    sol = solve_ivp(rhs, (0.0, t_max), [T0], max_step=5.0, dense_output=True)
+
+    # Terminal event at T = T_sat: stops the integrator cleanly at the kink
+    # in dT/dt, then we stitch a constant T_sat tail. Avoids RK45 overshoot
+    # / wobble across the saturation discontinuity.
+    def hit_sat(_t, y):
+        return y[0] - T_sat_k
+    hit_sat.terminal = True
+    hit_sat.direction = 1.0
+
+    sol = solve_ivp(
+        rhs, (0.0, t_max), [T0],
+        max_step=5.0, dense_output=True, events=hit_sat,
+    )
     t_grid = np.linspace(0.0, t_max, 1000)
-    T_grid = sol.sol(t_grid)[0]
+    if sol.t_events[0].size > 0:
+        t_sat = float(sol.t_events[0][0])
+        pre = t_grid <= t_sat
+        T_grid = np.empty_like(t_grid)
+        T_grid[pre] = sol.sol(t_grid[pre])[0]
+        T_grid[~pre] = T_sat_k
+    else:
+        T_grid = sol.sol(t_grid)[0]
 
     # Time to reach 95 C (368.15 K) — interpolate from the ODE solution.
     target_k = 95.0 + 273.15
@@ -141,24 +197,45 @@ def plot_heating(
     sim_u_max_mmps: np.ndarray,
     lumped: dict,
     out_path: pathlib.Path,
+    t_onb: float | None = None,
 ) -> None:
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
 
-    # Left: mean water T — sim vs lumped
+    # Left: mean water T — sim vs lumped, with ONB validity-window annotation
     axes[0].plot(lumped["t"], lumped["T_k"] - 273.15, "--", color="gray", label="Lumped capacitance")
     axes[0].plot(sim_t, sim_T_mean, "-", color="tab:red", label="Sim (mean water)")
     axes[0].axhline(95.0, ls=":", color="k", alpha=0.5)
+    if t_onb is not None:
+        axes[0].axvline(t_onb, color="k", linestyle=":", alpha=0.6)
+        sim_T_at_onb = float(np.interp(t_onb, sim_t, sim_T_mean))
+        lumped_T_at_onb = float(np.interp(t_onb, lumped["t"], lumped["T_k"] - 273.15))
+        axes[0].plot([t_onb], [sim_T_at_onb], "ro", markersize=6, zorder=5)
+        axes[0].plot([t_onb], [lumped_T_at_onb], "o", color="gray", markersize=6, zorder=5)
+        # Anchor the annotation just above the sim point so it stays clear of
+        # the legend regardless of run length / y-range.
+        axes[0].annotate(
+            f"ONB t={t_onb:.0f}s\n(Phase-2 valid until here)",
+            xy=(t_onb, sim_T_at_onb),
+            xytext=(t_onb + 0.06 * sim_t[-1], sim_T_at_onb + 12),
+            arrowprops=dict(arrowstyle="->", alpha=0.5),
+            fontsize=8,
+        )
     axes[0].set_xlabel("time [s]")
     axes[0].set_ylabel("T [C]")
     axes[0].set_title(f"{scenario_name}: mean water T")
-    axes[0].legend()
+    axes[0].legend(loc="lower right")
     axes[0].grid(alpha=0.3)
 
-    # Middle: max wall T
+    # Middle: max wall T, with T_ONB threshold + t_ONB crossing
     axes[1].plot(sim_t, sim_T_max_wall, "-", color="tab:orange")
+    axes[1].axhline(T_ONB_C, color="k", linestyle=":", alpha=0.6,
+                    label=f"T_ONB = {T_ONB_C:.0f} C")
+    if t_onb is not None:
+        axes[1].axvline(t_onb, color="k", linestyle=":", alpha=0.6)
     axes[1].set_xlabel("time [s]")
     axes[1].set_ylabel("T [C]")
-    axes[1].set_title("max wall T")
+    axes[1].set_title("max wall T (ONB when this crosses 105C)")
+    axes[1].legend(loc="lower right")
     axes[1].grid(alpha=0.3)
 
     # Right: peak velocity
@@ -202,18 +279,24 @@ def main() -> int:
         cfg.solver.pressure_max_iter = args.pressure_iters
     if args.dx_mm is not None:
         cfg.grid.dx_m = args.dx_mm / 1000.0
+    # Phase-2 single-phase heating: force the nucleate-boiling kernel stack off
+    # so the comparison against the lumped-capacitance ODE is apples-to-apples.
+    # run_boiling.py / run_retention.py / run_dashboard.py / capture_sample_snapshot.py
+    # all force enabled = True for their multi-phase use cases.
+    cfg.boiling.enabled = False
 
     material = cfg.pot.material
     print(f"=== Heating scenario: {material} ===")
     print(f"  config   : {args.config}")
     print(f"  duration : {cfg.total_time_s:.1f}s")
     print(f"  grid dx  : {cfg.grid.dx_m*1000:.2f}mm")
+    print(f"  boiling  : {'enabled' if cfg.boiling.enabled else 'disabled (Phase-2 single-phase)'}")
 
     # Lumped reference
     lumped = lumped_capacitance_ode(cfg)
     print(f"  lumped: m_water={lumped['m_water_kg']:.3f}kg  m_pot={lumped['m_pot_kg']:.3f}kg  "
           f"C={lumped['C_sys_j_per_k']/1000:.1f}kJ/K  P_stove={lumped['P_stove_w']:.1f}W  "
-          f"P_evap_max={lumped['P_evap_max_w']:.1f}W (gated 85-100C)")
+          f"P_evap_max={lumped['P_evap_max_w']:.1f}W (ramp 85-100C; T pinned at 100C dynamically)")
     if lumped["t_to_95c_s"] is not None:
         print(f"  lumped: time-to-95C = {lumped['t_to_95c_s']:.1f}s ({lumped['t_to_95c_s']/60:.2f}min)")
     else:
@@ -242,44 +325,42 @@ def main() -> int:
     sim_T_max_wall = np.array([s.T_max_wall_c for s in scalars])
     sim_u_max_mmps = np.array([s.u_max_mps for s in scalars]) * 1000
 
-    # Time-to-95 from sim
-    if sim_T_mean.max() >= 95.0:
-        idx = int(np.argmax(sim_T_mean >= 95.0))
-        sim_t95 = float(sim_t[idx])
-        print(f"  sim: time-to-95C = {sim_t95:.1f}s ({sim_t95/60:.2f}min)")
-    else:
-        sim_t95 = None
-        print(f"  sim: does not reach 95C — T_final={sim_T_mean[-1]:.2f}C")
+    # Find t_ONB (the boundary of the Phase-2 valid window).
+    t_onb = find_first_crossing(sim_t, sim_T_max_wall, T_ONB_C)
 
-    # Comparison summary
-    print("\n=== Summary ===")
+    # ============= Phase-2 acceptance summary (ONB-window) =============
+    print("\n=== Phase-2 validation (sim vs lumped, valid up to t_ONB) ===")
     print(f"  {'':20s}{'sim':>10s}{'lumped':>10s}{'err':>10s}")
-    # ONB-capped comparison (Phase 2 is only valid up to onset of nucleate boiling).
-    T_ONB_C = 105.0
-    above = sim_T_max_wall >= T_ONB_C
-    if above.any():
-        idx = int(np.argmax(above))
-        if idx > 0:
-            y0, y1 = sim_T_max_wall[idx - 1], sim_T_max_wall[idx]
-            t0, t1 = sim_t[idx - 1], sim_t[idx]
-            frac = (T_ONB_C - y0) / (y1 - y0) if y1 != y0 else 0.0
-            t_onb = float(t0 + frac * (t1 - t0))
-        else:
-            t_onb = float(sim_t[0])
+    if t_onb is not None:
         sim_T_at_onb = float(np.interp(t_onb, sim_t, sim_T_mean))
         lumped_T_at_onb = float(np.interp(t_onb, lumped["t"], lumped["T_k"] - 273.15))
         err_onb = 100.0 * (sim_T_at_onb - lumped_T_at_onb) / lumped_T_at_onb
-        print(f"  {'t_ONB_s':20s}{t_onb:10.1f}   (T_wall hits {T_ONB_C}C)")
-        print(f"  {'T_water_at_ONB':20s}{sim_T_at_onb:10.2f}{lumped_T_at_onb:10.2f}{err_onb:9.2f}%")
-    print(f"  {'T_final_c':20s}{sim_T_mean[-1]:10.2f}{lumped['T_k'][-1]-273.15:10.2f}"
-          f"{100.0*(sim_T_mean[-1]-(lumped['T_k'][-1]-273.15))/(lumped['T_k'][-1]-273.15):9.2f}%")
-    if sim_t95 is not None and lumped["t_to_95c_s"] is not None:
-        err = 100.0 * (sim_t95 - lumped["t_to_95c_s"]) / lumped["t_to_95c_s"]
-        print(f"  {'t_to_95c_s':20s}{sim_t95:10.1f}{lumped['t_to_95c_s']:10.1f}{err:9.2f}%")
+        print(f"  {'t_ONB_s':20s}{t_onb:10.1f}   (T_wall hits {T_ONB_C:.0f}C)")
+        print(f"  {'T_water_at_ONB_c':20s}{sim_T_at_onb:10.2f}{lumped_T_at_onb:10.2f}{err_onb:9.2f}%")
+    else:
+        print(f"  T_wall never reached {T_ONB_C:.0f}C — full run is Phase-2 valid")
+        sim_t95 = float(sim_t[int(np.argmax(sim_T_mean >= 95.0))]) if sim_T_mean.max() >= 95.0 else None
+        if sim_t95 is not None and lumped["t_to_95c_s"] is not None:
+            err = 100.0 * (sim_t95 - lumped["t_to_95c_s"]) / lumped["t_to_95c_s"]
+            print(f"  {'t_to_95c_s':20s}{sim_t95:10.1f}{lumped['t_to_95c_s']:10.1f}{err:9.2f}%")
+
+    # ============= Post-ONB diagnostic (NOT acceptance criteria) =============
+    # These metrics are reported for visibility but are not Phase-2 valid:
+    # past t_ONB the sim has no boiling cap (water can pass T_sat) and the
+    # lumped pins at T_sat dynamically — different physics, expected divergence.
+    if t_onb is not None:
+        print("\n  --- post-ONB diagnostic (comparison invalid past t_ONB) ---")
+        sim_t95 = float(sim_t[int(np.argmax(sim_T_mean >= 95.0))]) if sim_T_mean.max() >= 95.0 else None
+        print(f"  {'T_final_c':20s}{sim_T_mean[-1]:10.2f}{lumped['T_k'][-1]-273.15:10.2f}"
+              f"{100.0*(sim_T_mean[-1]-(lumped['T_k'][-1]-273.15))/(lumped['T_k'][-1]-273.15):9.2f}%")
+        if sim_t95 is not None and lumped["t_to_95c_s"] is not None:
+            err = 100.0 * (sim_t95 - lumped["t_to_95c_s"]) / lumped["t_to_95c_s"]
+            print(f"  {'t_to_95c_s':20s}{sim_t95:10.1f}{lumped['t_to_95c_s']:10.1f}{err:9.2f}%")
 
     # Plot
     plot_path = args.out_dir / f"phase2_heating_{tag}.png"
-    plot_heating(tag, sim_t, sim_T_mean, sim_T_max_wall, sim_u_max_mmps, lumped, plot_path)
+    plot_heating(tag, sim_t, sim_T_mean, sim_T_max_wall, sim_u_max_mmps, lumped,
+                 plot_path, t_onb=t_onb)
     return 0
 
 

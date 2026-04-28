@@ -101,20 +101,35 @@ def plot_radial_at_t(
     axes[1].legend(loc="best")
     axes[1].grid(alpha=0.3)
 
-    # Print the key numbers
+    # Print the key numbers.
+    # Cell-center grid alignment: r_grid is sorted ascending. The first cell
+    # with center >= r_inner is the inner-wall cell; the last cell with
+    # center < r_outer is the outer-wall cell. We deliberately do NOT use
+    # argmin-to-r_outer here — when wall_thickness ≈ dx the closest cell
+    # ties between the last wall cell and the first air cell, and floating-
+    # point rounding can land in air (T = T_ambient), producing a spurious
+    # "ΔT across wall = T_wall − T_ambient" instead of the actual conduction
+    # drop. searchsorted picks the wall cell unambiguously.
+    i_inner = int(np.searchsorted(r_grid, r_inner, side="left"))
+    i_outer = int(np.searchsorted(r_grid, r_outer, side="left")) - 1
+    if i_outer < i_inner:
+        # Wall is unresolved at this dx (< 1 cell). Collapse to a single cell
+        # so the report still prints something sensible.
+        i_outer = i_inner
+    i_mid = (i_inner + i_outer) // 2
+    n_wall_cells = i_outer - i_inner + 1
     print(f"\n=== {material} radial profile @ t={actual_t:.1f}s ===")
-    # T at the wall's mid-thickness
-    r_mid_wall = 0.5 * (r_inner + r_outer)
-    i_mid = int(np.argmin(np.abs(r_grid - r_mid_wall)))
-    i_inner = int(np.argmin(np.abs(r_grid - r_inner)))
-    i_outer = int(np.argmin(np.abs(r_grid - r_outer)))
-    print(f"  T at r=0 (water core):       {T_grid_c[0]:.2f} °C")
-    print(f"  T at r=r_inner-dx (water BL):{T_grid_c[max(i_inner-1, 0)]:.2f} °C")
-    print(f"  T at r=r_inner (inner wall): {T_grid_c[i_inner]:.2f} °C")
-    print(f"  T at r=mid-wall:             {T_grid_c[i_mid]:.2f} °C")
-    print(f"  T at r=r_outer (outer wall): {T_grid_c[i_outer]:.2f} °C")
+    print(f"  wall resolution: {n_wall_cells} cell{'s' if n_wall_cells != 1 else ''} "
+          f"across {(r_outer-r_inner)*1000:.1f}mm wall (dx={dx*1000:.1f}mm)")
+    print(f"  T at r=0 (water core):           {T_grid_c[0]:.2f} °C")
+    print(f"  T at r=r_inner-dx (water BL):    {T_grid_c[max(i_inner-1, 0)]:.2f} °C")
+    print(f"  T at r=r_inner (inner wall):     {T_grid_c[i_inner]:.2f} °C")
+    print(f"  T at r=mid-wall:                 {T_grid_c[i_mid]:.2f} °C")
+    print(f"  T at r=r_outer-dx (outer wall):  {T_grid_c[i_outer]:.2f} °C")
+    print(f"  T at r=r_outer+dx (outer air):   "
+          f"{T_grid_c[i_outer+1]:.2f} °C  (ambient sanity check)")
     dT_across_wall = T_grid_c[i_inner] - T_grid_c[i_outer]
-    print(f"  ΔT across wall (inner-outer):{dT_across_wall:+.2f} K  "
+    print(f"  ΔT across wall (inner-outer):    {dT_across_wall:+.2f} K  "
           f"({'small for copper OK' if abs(dT_across_wall) < 5 else 'check this'})")
 
     fig.tight_layout()
@@ -134,9 +149,9 @@ def main() -> int:
     config_dir = ROOT / "configs" / "scenarios"
 
     scenarios = [
-        ("steel_304", "default.yaml", bench_dir / "phase2_heating_steel_304_impl_dx2mm.h5"),
-        ("aluminum", "aluminum.yaml", bench_dir / "phase2_heating_aluminum_impl_dx2mm.h5"),
-        ("copper", "copper.yaml", bench_dir / "phase2_heating_copper_impl_dx2mm.h5"),
+        ("steel_304", "default.yaml", bench_dir / "phase2_heating_steel_304_impl.h5"),
+        ("aluminum", "aluminum.yaml", bench_dir / "phase2_heating_aluminum_impl.h5"),
+        ("copper", "copper.yaml", bench_dir / "phase2_heating_copper_impl.h5"),
     ]
 
     for material, yaml_name, h5_path in scenarios:

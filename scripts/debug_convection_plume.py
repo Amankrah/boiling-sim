@@ -27,7 +27,7 @@ from boilingsim.fluid import (  # noqa: E402
     enforce_no_slip,
     pressure_projection,
 )
-from boilingsim.geometry import MAT_FLUID, MAT_POT_WALL, Grid  # noqa: E402
+from boilingsim.geometry import MAT_AIR, MAT_FLUID, MAT_POT_WALL, Grid  # noqa: E402
 from boilingsim.thermal import (  # noqa: E402
     MaterialProps,
     allocate_thermal_workspace,
@@ -69,14 +69,14 @@ def conduct_pure(grid: Grid, props: MaterialProps, ws_t, dt: float):
     nx, ny, nz = grid.shape
     dx = grid.dx
     wp.launch(heat_conduction_flux_x, dim=(nx + 1, ny, nz),
-              inputs=[ws_t.flux_x, grid.T, grid.mat, props.k_wp, dx, 10.0, 2])
+              inputs=[ws_t.flux_x, grid.T, grid.mat, props.k_wp, dx, 10.0, MAT_AIR])
     wp.launch(heat_conduction_flux_y, dim=(nx, ny + 1, nz),
-              inputs=[ws_t.flux_y, grid.T, grid.mat, props.k_wp, dx, 10.0, 2])
+              inputs=[ws_t.flux_y, grid.T, grid.mat, props.k_wp, dx, 10.0, MAT_AIR])
     wp.launch(heat_conduction_flux_z, dim=(nx, ny, nz + 1),
-              inputs=[ws_t.flux_z, grid.T, grid.mat, props.k_wp, dx, 10.0, 2])
+              inputs=[ws_t.flux_z, grid.T, grid.mat, props.k_wp, dx, 10.0, MAT_AIR])
     wp.launch(apply_conduction_update, dim=(nx, ny, nz),
               inputs=[grid.T, ws_t.flux_x, ws_t.flux_y, ws_t.flux_z, grid.mat,
-                      props.rho_wp, props.cp_wp, dx, dt])
+                      props.rho_wp, props.cp_wp, dx, dt, MAT_AIR])
 
 
 def main() -> int:

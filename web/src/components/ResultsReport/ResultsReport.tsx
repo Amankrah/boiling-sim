@@ -13,7 +13,7 @@
 // Every chart uses Recharts with colours from the design tokens, so
 // the visual matches the Live page's time-series strip.
 
-import { useMemo } from "react";
+import { useMemo, useRef, useState, type RefObject } from "react";
 import {
   Area,
   AreaChart,
@@ -34,7 +34,13 @@ import type {
   RunSummary,
   ScalarRow,
 } from "../../hooks/useRunArtefacts";
+import { exportAllChartsAsZip } from "../../hooks/useChartExport";
 import { Button } from "../ui/Button";
+
+import { BoilingVigorCard } from "./BoilingVigorCard";
+import { FinalPartitionDonutCard } from "./FinalPartitionDonutCard";
+import { HeatUpStorylineCard } from "./HeatUpStorylineCard";
+import { NutrientLossRateCard } from "./NutrientLossRateCard";
 
 interface Props {
   artefacts: RunArtefacts;
@@ -43,10 +49,15 @@ interface Props {
 
 export function ResultsReport({ artefacts, onStartNewRun }: Props) {
   const { summary, scalars, runId } = artefacts;
+  const reportRef = useRef<HTMLDivElement | null>(null);
   return (
-    <div className="results-report">
+    <div className="results-report" ref={reportRef}>
       <Headline summary={summary} />
-      <DownloadButtons runId={runId} onStartNewRun={onStartNewRun} />
+      <DownloadButtons
+        runId={runId}
+        reportRoot={reportRef}
+        onStartNewRun={onStartNewRun}
+      />
       <ExitCheckAudit summary={summary} />
       <div className="report-grid">
         <MassPartitionCard scalars={scalars} summary={summary} which="primary" />
@@ -56,6 +67,10 @@ export function ResultsReport({ artefacts, onStartNewRun }: Props) {
         <ThermalCard scalars={scalars} />
         <MassBalanceCard scalars={scalars} summary={summary} />
         <BubblesCard scalars={scalars} />
+        <HeatUpStorylineCard scalars={scalars} />
+        <BoilingVigorCard scalars={scalars} />
+        <NutrientLossRateCard scalars={scalars} summary={summary} />
+        <FinalPartitionDonutCard summary={summary} />
         <PerformanceCard summary={summary} />
       </div>
       <TrajectoryTable scalars={scalars} summary={summary} />
@@ -115,12 +130,26 @@ function expectedBand(nutrientName: string): [number, number] | null {
 
 function DownloadButtons({
   runId,
+  reportRoot,
   onStartNewRun,
 }: {
   runId: string;
+  reportRoot: RefObject<HTMLDivElement | null>;
   onStartNewRun?: () => void;
 }) {
   const baseHref = `/api/runs/${encodeURIComponent(runId)}`;
+  const [exporting, setExporting] = useState(false);
+  const onExportAll = async () => {
+    if (!reportRoot.current || exporting) return;
+    setExporting(true);
+    try {
+      await exportAllChartsAsZip(reportRoot.current, runId);
+    } catch {
+      // Best-effort export -- swallow and let the user retry.
+    } finally {
+      setExporting(false);
+    }
+  };
   return (
     <div className="report-downloads">
       <a className="btn btn--primary" href={`${baseHref}/data.h5`} download>
@@ -132,6 +161,9 @@ function DownloadButtons({
       <a className="btn" href={`${baseHref}/summary.json`} download>
         Download summary JSON
       </a>
+      <Button onClick={onExportAll} disabled={exporting}>
+        {exporting ? "Exporting…" : "Export all charts (ZIP)"}
+      </Button>
       {onStartNewRun ? (
         <span style={{ flex: 1 }} />
       ) : null}
@@ -242,7 +274,10 @@ function MassPartitionCard({
           d: summary.final.degraded2_pct ?? 0,
         };
   return (
-    <section className="report-card">
+    <section
+      className="report-card"
+      data-chart-name={`mass_partition_${which}`}
+    >
       <div className="report-card__head">
         <span className="report-card__title">{title}</span>
         <span className="report-card__value mono">
@@ -298,7 +333,7 @@ function ThermalCard({ scalars }: { scalars: ScalarRow[] }) {
   }, [scalars]);
   const last = data.length > 0 ? data[data.length - 1] : null;
   return (
-    <section className="report-card">
+    <section className="report-card" data-chart-name="thermal">
       <div className="report-card__head">
         <span className="report-card__title">Temperatures (°C)</span>
         <span className="report-card__value mono">
@@ -359,7 +394,7 @@ function MassBalanceCard({
   const maxDrift = summary.mass_balance?.max_abs_drift_pct ?? 0;
   const gateOk = maxDrift < 0.5;
   return (
-    <section className="report-card">
+    <section className="report-card" data-chart-name="mass_balance">
       <div className="report-card__head">
         <span className="report-card__title">Mass-balance drift (primary)</span>
         <span
@@ -408,7 +443,7 @@ function BubblesCard({ scalars }: { scalars: ScalarRow[] }) {
   );
   const last = data.length > 0 ? data[data.length - 1].n : 0;
   return (
-    <section className="report-card">
+    <section className="report-card" data-chart-name="bubbles">
       <div className="report-card__head">
         <span className="report-card__title">Active bubbles</span>
         <span className="report-card__value mono">{last.toLocaleString()}</span>
@@ -438,7 +473,7 @@ function BubblesCard({ scalars }: { scalars: ScalarRow[] }) {
 
 function PerformanceCard({ summary }: { summary: RunSummary }) {
   return (
-    <section className="report-card">
+    <section className="report-card" data-chart-name="performance">
       <div className="report-card__head">
         <span className="report-card__title">Performance</span>
       </div>
