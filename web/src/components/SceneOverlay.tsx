@@ -61,6 +61,11 @@ function partitions(snapshot: Snapshot): Partition[] {
 export function SceneOverlay({ snapshot, variant = "overlay" }: Props) {
   const parts = partitions(snapshot);
   const hero = parts[0] ?? null;
+  const runProgressPct =
+    snapshot.total_time_s > 0
+      ? Math.min(100, (100 * snapshot.t_sim) / snapshot.total_time_s)
+      : 0;
+  const runProgressAriaNow = Math.round(runProgressPct);
   const className =
     variant === "sidebar"
       ? "scene-overlay scene-overlay--sidebar"
@@ -133,35 +138,13 @@ export function SceneOverlay({ snapshot, variant = "overlay" }: Props) {
         </span>
       </div>
       {snapshot.total_time_s > 0 ? (
-        <div
+        <progress
           className="scene-overlay__progress"
-          role="progressbar"
+          max={100}
+          value={runProgressAriaNow}
           aria-label="run progress"
-          aria-valuemin={0 as number}
-          aria-valuemax={100 as number}
-          aria-valuenow={
-            Math.round(
-              Math.min(
-                100,
-                (100 * snapshot.t_sim) / snapshot.total_time_s,
-              ),
-            ) as number
-          }
-          data-pct={Math.min(
-            100,
-            (100 * snapshot.t_sim) / snapshot.total_time_s,
-          )}
-        >
-          <div
-            className="scene-overlay__progress-fill"
-            style={{
-              width: `${Math.min(
-                100,
-                (100 * snapshot.t_sim) / snapshot.total_time_s,
-              )}%`,
-            }}
-          />
-        </div>
+          data-pct={runProgressPct}
+        />
       ) : null}
       <div className="scene-overlay__row">
         <span>step</span>

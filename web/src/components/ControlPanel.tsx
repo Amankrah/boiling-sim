@@ -106,6 +106,19 @@ export function ControlPanel({
                 </Button>
               )}
               <Button
+                variant="primary"
+                fullWidth
+                disabled={
+                  !snapshot
+                  || snapshot.is_complete
+                  || snapshot.t_sim === 0
+                }
+                onClick={() => sendCommand({ type: "finalize" })}
+                title="Stop the run now and produce results from the data collected so far."
+              >
+                Finish &amp; save
+              </Button>
+              <Button
                 variant="danger"
                 fullWidth
                 onClick={() => sendCommand({ type: "reset" })}

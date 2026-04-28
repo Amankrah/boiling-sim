@@ -245,7 +245,11 @@ def main() -> int:
     snapshot_interval_s = 1.0 / max(args.snapshot_hz, 0.1)
     last_snapshot_at: float = -1.0
     step_count: int = 0
-    paused: bool = False
+    # Start paused so the GPU isn't burning cycles on a sim nobody's
+    # watching yet. The browser flips us live when the user clicks
+    # Resume on the Live page or Apply & Start Run on the Config page
+    # (which sends `start_run`, see the drain handler below).
+    paused: bool = True
     last_progress_at = time.perf_counter()
 
     # Run lifecycle state (Phase 6.6 v3):
@@ -276,7 +280,9 @@ def main() -> int:
     print(f"  total_time_s : {total_time_s} (0 = run forever)")
     print(f"  ingest  -> tcp://{args.ingest_host}:{args.ingest_port}")
     print(f"  control <- tcp://{args.control_host}:{args.control_port}")
-    print("  running; Ctrl-C to stop")
+    print("  paused at t=0 -- click Resume on the Live page or "
+          "'Apply & Start Run' on the Config page to begin stepping")
+    print("  Ctrl-C to stop")
 
     def reset_run(fresh_sim: Simulation) -> tuple[str, ScalarHistory, float, bool]:
         """Reset run-scoped state after a Simulation rebuild."""
@@ -290,6 +296,48 @@ def main() -> int:
             False,
         )
 
+    def finalize_run() -> None:
+        """Write artefacts for the current history, mark complete, emit
+        the completion snapshot. Shared by the auto-complete (duration
+        reached) and `finalize` (user-stopped mid-run) code paths so
+        both produce identical output. No-op if history is empty."""
+        nonlocal is_complete, paused, last_snapshot_at, last_error
+        if len(history) == 0:
+            print("  [finalize] skipping: history empty")
+            return
+        wall_clock = time.perf_counter() - run_start_wall
+        try:
+            h5_path, csv_path, json_path = write_run_artefacts(
+                history, cfg, run_id, artefacts_dir,
+                wall_clock_s=wall_clock,
+                nutrient_primary_name=_classify_nutrient(cfg.nutrient),
+                nutrient_secondary_name=_classify_nutrient(
+                    getattr(cfg, "nutrient2", None),
+                ),
+            )
+        except Exception as e:
+            print(f"  [finalize] failed to write artefacts: {e}")
+            last_error = f"finalize failed: {e}"
+            return
+        print(
+            f"  [complete] run_id={run_id} wall={wall_clock:.1f}s "
+            f"artefacts: {h5_path.name}, {csv_path.name}, {json_path.name}"
+        )
+        is_complete = True
+        paused = True  # stop stepping until user triggers a new run
+        # Emit the completion snapshot immediately so the browser gets
+        # the is_complete=True signal without waiting for the cadence.
+        producer.send_snapshot(
+            sim, step=step_count,
+            is_rebuilding=False,
+            is_paused=paused,
+            run_id=run_id,
+            total_time_s=total_time_s,
+            is_complete=True,
+            last_error=last_error,
+        )
+        last_snapshot_at = time.perf_counter()
+
     try:
         while True:
             # 1. Drain control messages -> classify each.
@@ -297,6 +345,7 @@ def main() -> int:
             latest_rebuild_msg: dict[str, Any] | None = None
             duration_change: float | None = None  # from start_run
             do_export = False
+            do_finalize_now = False
             for msg in consumer.drain():
                 kind = msg.get("type")
                 if kind == "pause":
@@ -309,11 +358,21 @@ def main() -> int:
                     # Begin a new timed run (usually after set_config).
                     # Deferred: applied AFTER any pending rebuild so the
                     # new history's cap matches the new duration.
+                    # Also unpauses so the very first run after launch
+                    # (where the loop boots in the paused-at-t=0 idle
+                    # state) actually starts stepping.
                     duration_change = float(msg.get("duration_s", 600.0))
+                    paused = False
                     continue
                 if kind == "export_snapshot":
                     # Write artefacts mid-run without resetting state.
                     do_export = True
+                    continue
+                if kind == "finalize":
+                    # User clicked "Finish & save": stop the run NOW,
+                    # write artefacts from the partial history, flip
+                    # is_complete so the Results page becomes available.
+                    do_finalize_now = True
                     continue
                 if apply_control_live(sim, msg):
                     rebuild_pending = True
@@ -376,39 +435,17 @@ def main() -> int:
                     print(f"  [export] failed: {e}")
                     last_error = f"export failed: {e}"
 
-            # 3. Auto-complete on duration reached.
+            # 3a. User-triggered finalize: stop NOW, write artefacts.
+            if do_finalize_now and not is_complete:
+                finalize_run()
+
+            # 3b. Auto-complete on duration reached.
             if (
                 total_time_s > 0.0
                 and sim.t >= total_time_s
                 and not is_complete
             ):
-                wall_clock = time.perf_counter() - run_start_wall
-                h5_path, csv_path, json_path = write_run_artefacts(
-                    history, cfg, run_id, artefacts_dir,
-                    wall_clock_s=wall_clock,
-                    nutrient_primary_name=_classify_nutrient(cfg.nutrient),
-                    nutrient_secondary_name=_classify_nutrient(
-                        getattr(cfg, "nutrient2", None),
-                    ),
-                )
-                print(
-                    f"  [complete] run_id={run_id} wall={wall_clock:.1f}s "
-                    f"artefacts: {h5_path.name}, {csv_path.name}, {json_path.name}"
-                )
-                is_complete = True
-                paused = True  # stop stepping until user triggers a new run
-                # Emit the completion snapshot immediately so the
-                # browser gets the is_complete=True signal.
-                producer.send_snapshot(
-                    sim, step=step_count,
-                    is_rebuilding=False,
-                    is_paused=paused,
-                    run_id=run_id,
-                    total_time_s=total_time_s,
-                    is_complete=True,
-                    last_error=last_error,
-                )
-                last_snapshot_at = time.perf_counter()
+                finalize_run()
 
             # 4. Step (skip if paused or complete, but keep the snapshot
             #    cadence so the browser stays responsive).

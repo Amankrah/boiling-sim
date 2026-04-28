@@ -9,6 +9,7 @@
 
 import { BoilingScene, type CameraPose } from "../components/BoilingScene";
 import { ControlPanel } from "../components/ControlPanel";
+import { IdleBanner } from "../components/IdleBanner";
 import { RebuildBanner } from "../components/RebuildBanner";
 import { SceneOverlay } from "../components/SceneOverlay";
 import { TimeSeriesPanel } from "../components/TimeSeriesPanel";
@@ -59,6 +60,13 @@ export function LivePage({
           </div>
         )}
         {snapshot?.is_rebuilding ? <RebuildBanner /> : null}
+        {snapshot
+          && snapshot.is_paused
+          && snapshot.t_sim === 0
+          && !snapshot.is_complete
+          && !snapshot.is_rebuilding
+          ? <IdleBanner />
+          : null}
       </section>
 
       <aside className="app__controls">

@@ -173,6 +173,11 @@ export type ControlMessage =
   | { type: "pause" }
   | { type: "resume" }
   | { type: "reset" }
+  // Stop the run mid-flight, write the partial-history artefacts, and
+  // flip is_complete so the Results page becomes available. Distinct
+  // from export_snapshot (which keeps stepping) and reset (which
+  // discards everything).
+  | { type: "finalize" }
   | { type: "request_full_snapshot" };
 
 export type ConnectionState = "connecting" | "open" | "closed" | "error";

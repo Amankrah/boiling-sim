@@ -68,12 +68,14 @@ export function App() {
   // Seed Python with URL-derived params once the WS is open, for
   // fields that differ from the scenario default.
   const seededRef = useRef(false);
+  const heatFluxSeededFromUrlRef = useRef(false);
   useEffect(() => {
     if (seededRef.current || connectionState !== "open") return;
     seededRef.current = true;
     const d = DEFAULT_SHARE_STATE.params;
     if (params.heatFluxWPerM2 !== d.heatFluxWPerM2) {
       sendCommand({ type: "set_heat_flux", value: params.heatFluxWPerM2 });
+      heatFluxSeededFromUrlRef.current = true;
     }
     if (params.material !== d.material) {
       sendCommand({ type: "set_material", value: params.material });
@@ -89,6 +91,29 @@ export function App() {
       });
     }
   }, [connectionState, params, sendCommand]);
+
+  // Pull the sim's actual wall_heat_flux into params on first snapshot
+  // when URL didn't already pin the slider to a non-default value.
+  // Without this, opening the dashboard against a sim running at the
+  // YAML default flux (e.g. q = 60 or 80 kW/m²) leaves the slider
+  // stuck at the share-default 30 while the sidebar overlay and the
+  // bottom heat-flux chart — both reading directly from the snapshot —
+  // correctly show the live sim value. The mismatch confused users
+  // into thinking their slider edit hadn't taken effect when in fact
+  // the slider had never been synced to reality in the first place.
+  const heatFluxSyncedRef = useRef(false);
+  useEffect(() => {
+    if (heatFluxSyncedRef.current) return;
+    if (!snapshot) return;
+    heatFluxSyncedRef.current = true;
+    // If URL specified a non-default flux, the seeding effect above
+    // already pushed it to Python — trust the URL as authoritative.
+    if (heatFluxSeededFromUrlRef.current) return;
+    const live = snapshot.wall_heat_flux;
+    if (Math.abs(live - params.heatFluxWPerM2) > 50) {
+      setParams((p) => ({ ...p, heatFluxWPerM2: live }));
+    }
+  }, [snapshot, params.heatFluxWPerM2]);
 
   useEffect(() => {
     pushShareState({ params, camera });

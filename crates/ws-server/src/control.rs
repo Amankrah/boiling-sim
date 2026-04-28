@@ -44,6 +44,13 @@ pub enum ControlMessage {
     Pause,
     Resume,
     Reset,
+    /// Stop the run mid-flight, write the partial-history artefacts,
+    /// and flip `is_complete` so the Results page becomes available.
+    /// Distinct from `ExportSnapshot` (which keeps stepping) and
+    /// `Reset` (which discards the run). Used when the user has seen
+    /// enough and wants to inspect results without waiting for
+    /// `total_time_s`.
+    Finalize,
     RequestFullSnapshot,
 }
 
@@ -141,10 +148,19 @@ mod tests {
             (r#"{"type":"pause"}"#, ControlMessage::Pause),
             (r#"{"type":"resume"}"#, ControlMessage::Resume),
             (r#"{"type":"reset"}"#, ControlMessage::Reset),
+            (r#"{"type":"finalize"}"#, ControlMessage::Finalize),
             (r#"{"type":"request_full_snapshot"}"#, ControlMessage::RequestFullSnapshot),
         ] {
             assert_eq!(ControlMessage::from_json(raw).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn round_trip_finalize() {
+        let cmd = ControlMessage::Finalize;
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(json, r#"{"type":"finalize"}"#);
+        assert_eq!(ControlMessage::from_json(&json).unwrap(), cmd);
     }
 
     #[test]
