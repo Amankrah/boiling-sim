@@ -56,6 +56,24 @@ export function HeatUpStorylineCard({ scalars }: Props) {
     [scalars],
   );
 
+  // Drop any milestone whose timestamp falls outside the visible
+  // X-axis range. Recharts otherwise clips the ReferenceLine to the
+  // chart edge and renders its label as a vertical column of glyphs
+  // stacked on the y-axis -- which is what produced the garbled
+  // "78320312"-looking label when finalize was clicked on a run whose
+  // history had been trimmed past the early milestones.
+  const tMin = data.length > 0 ? data[0].t : -Infinity;
+  const tMax = data.length > 0 ? data[data.length - 1].t : Infinity;
+  const inRange = (t: number | undefined): t is number =>
+    t !== undefined && t >= tMin && t <= tMax;
+  const tSat = inRange(milestones.tSat) ? milestones.tSat : undefined;
+  const tFirstBubble = inRange(milestones.tFirstBubble)
+    ? milestones.tFirstBubble
+    : undefined;
+  const tFirstLoss = inRange(milestones.tFirstLoss)
+    ? milestones.tFirstLoss
+    : undefined;
+
   return (
     <ChartCard
       name="heat_up_storyline"
@@ -87,9 +105,9 @@ export function HeatUpStorylineCard({ scalars }: Props) {
               strokeDasharray="4 4"
               label={{ value: "T_sat", fill: colors.cool, fontSize: 10 }}
             />
-            {milestones.tSat !== undefined ? (
+            {tSat !== undefined ? (
               <ReferenceLine
-                x={milestones.tSat}
+                x={tSat}
                 stroke={colors.cool}
                 strokeDasharray="2 4"
                 label={{
@@ -100,9 +118,9 @@ export function HeatUpStorylineCard({ scalars }: Props) {
                 }}
               />
             ) : null}
-            {milestones.tFirstBubble !== undefined ? (
+            {tFirstBubble !== undefined ? (
               <ReferenceLine
-                x={milestones.tFirstBubble}
+                x={tFirstBubble}
                 stroke={colors.success}
                 strokeDasharray="2 4"
                 label={{
@@ -113,9 +131,9 @@ export function HeatUpStorylineCard({ scalars }: Props) {
                 }}
               />
             ) : null}
-            {milestones.tFirstLoss !== undefined ? (
+            {tFirstLoss !== undefined ? (
               <ReferenceLine
-                x={milestones.tFirstLoss}
+                x={tFirstLoss}
                 stroke={colors.warn}
                 strokeDasharray="2 4"
                 label={{

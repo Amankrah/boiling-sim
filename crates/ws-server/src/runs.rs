@@ -29,14 +29,94 @@ use tracing::{debug, warn};
 
 use crate::app::AppState;
 
-/// Default artefact directory if `BOILINGSIM_ARTIFACTS_DIR` is unset.
+/// Cwd-relative fallback when neither the env var nor a workspace
+/// root can be located. Last-resort path used by binaries that have
+/// been `cargo install`-ed outside a workspace; in normal dev/CI we
+/// always hit one of the higher-priority branches in [`artefact_dir`].
 pub const DEFAULT_ARTEFACT_DIR: &str = "./dashboard_runs";
 
-/// Returns the resolved artefact directory, honouring the env var.
+/// Names how [`artefact_dir`] resolved its path. Surfaced in the
+/// startup log so a glance at the terminal tells the user whether
+/// they're hitting the env-var override, the workspace-root walk-up,
+/// or the cwd fallback (the last of which usually means something is
+/// misconfigured).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtefactDirSource {
+    EnvVar,
+    WorkspaceRoot,
+    CwdFallback,
+}
+
+impl ArtefactDirSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::EnvVar => "via BOILINGSIM_ARTIFACTS_DIR",
+            Self::WorkspaceRoot => "via workspace root walk-up",
+            Self::CwdFallback => {
+                "via cwd fallback -- set BOILINGSIM_ARTIFACTS_DIR for explicit control"
+            }
+        }
+    }
+}
+
+/// Walk upward from `start` looking for a `Cargo.toml` whose contents
+/// contain `[workspace]`. Returns the directory holding that file (the
+/// workspace root) on success. None if no such file is found before
+/// reaching the filesystem root, or if any IO error trips the search.
+///
+/// This is the same pattern `cargo` itself uses to find the workspace
+/// from any nested directory. We deliberately keep walking past member
+/// crate `Cargo.toml`s (which lack `[workspace]`) — those files exist
+/// at e.g. `crates/ws-server/Cargo.toml` and would otherwise short-
+/// circuit the walk to the wrong directory.
+fn find_workspace_root_from(start: &std::path::Path) -> Option<PathBuf> {
+    let mut cur = start.to_path_buf();
+    loop {
+        let candidate = cur.join("Cargo.toml");
+        if candidate.is_file() {
+            if let Ok(text) = std::fs::read_to_string(&candidate) {
+                if text.contains("[workspace]") {
+                    return Some(cur);
+                }
+            }
+        }
+        if !cur.pop() {
+            return None;
+        }
+    }
+}
+
+/// Returns the resolved artefact directory along with the mechanism
+/// that produced it. Resolution priority:
+///
+///   1. `BOILINGSIM_ARTIFACTS_DIR` env var (explicit override).
+///   2. `<workspace_root>/dashboard_runs` discovered by walking up
+///      from the current working directory looking for the workspace
+///      root `Cargo.toml`. This is the new robust default that lets
+///      ws-server be launched from any cwd inside the workspace
+///      (project root, `web/`, `crates/ws-server/`, ...) and still
+///      resolve to the same artefact directory Python writes to.
+///   3. Cwd-relative `./dashboard_runs` as the last-resort fallback
+///      for binaries shipped outside a Cargo workspace.
+pub fn artefact_dir_with_source() -> (PathBuf, ArtefactDirSource) {
+    if let Ok(p) = std::env::var("BOILINGSIM_ARTIFACTS_DIR") {
+        return (PathBuf::from(p), ArtefactDirSource::EnvVar);
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(root) = find_workspace_root_from(&cwd) {
+            return (root.join("dashboard_runs"), ArtefactDirSource::WorkspaceRoot);
+        }
+    }
+    (PathBuf::from(DEFAULT_ARTEFACT_DIR), ArtefactDirSource::CwdFallback)
+}
+
+/// Returns the resolved artefact directory, honouring the env var
+/// then falling back to the workspace-root walk-up. Preferred call
+/// site for HTTP handlers that don't care about the source label;
+/// the startup logger uses [`artefact_dir_with_source`] instead so
+/// it can surface "which mechanism resolved this path" in the log.
 pub fn artefact_dir() -> PathBuf {
-    std::env::var("BOILINGSIM_ARTIFACTS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_ARTEFACT_DIR))
+    artefact_dir_with_source().0
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -273,5 +353,61 @@ mod tests {
         assert!(validate_run_id("../secrets/creds.env").is_err());
         // Exactly 32 chars but with a non-hex char.
         assert!(validate_run_id("0000000000000000000000000000000z").is_err());
+    }
+
+    #[test]
+    fn find_workspace_root_walks_up_past_member_crates() {
+        // Layout: tmp/Cargo.toml ([workspace]) + tmp/crates/foo/Cargo.toml
+        // (no [workspace]) + tmp/web/. From tmp/web/ and tmp/crates/foo/
+        // the walk-up should return tmp/, NOT tmp/crates/foo/.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/foo\"]\n",
+        ).unwrap();
+        std::fs::create_dir_all(root.join("crates/foo")).unwrap();
+        std::fs::write(
+            root.join("crates/foo/Cargo.toml"),
+            "[package]\nname = \"foo\"\nversion = \"0.0.0\"\n",
+        ).unwrap();
+        std::fs::create_dir_all(root.join("web")).unwrap();
+
+        // Canonicalise so the equality compares post-symlink paths.
+        let root_canon = root.canonicalize().unwrap();
+        for start_subdir in ["", "web", "crates/foo"] {
+            let start = root.join(start_subdir);
+            let found = find_workspace_root_from(&start)
+                .expect("walk should find workspace root")
+                .canonicalize()
+                .unwrap();
+            assert_eq!(
+                found, root_canon,
+                "walk from {start:?} should land at workspace root",
+            );
+        }
+    }
+
+    #[test]
+    fn find_workspace_root_returns_none_outside_workspace() {
+        // tempdir contains no Cargo.toml at all.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(find_workspace_root_from(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn artefact_dir_env_var_takes_priority() {
+        // Preserve any inherited env var so we don't poison subsequent
+        // tests in the same process.
+        let prior = std::env::var("BOILINGSIM_ARTIFACTS_DIR").ok();
+        std::env::set_var("BOILINGSIM_ARTIFACTS_DIR", "/tmp/explicit-override");
+        let (path, source) = artefact_dir_with_source();
+        assert_eq!(path, PathBuf::from("/tmp/explicit-override"));
+        assert_eq!(source, ArtefactDirSource::EnvVar);
+        // Restore.
+        match prior {
+            Some(v) => std::env::set_var("BOILINGSIM_ARTIFACTS_DIR", v),
+            None => std::env::remove_var("BOILINGSIM_ARTIFACTS_DIR"),
+        }
     }
 }

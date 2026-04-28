@@ -195,7 +195,7 @@ The Phase 6 live dashboard ships as three services wired by
 
 ### Local dev (no Docker)
 
-Each service runs standalone in its own terminal. Use the **repository root** as the working directory (there is no `backend/` folder).
+Each service runs standalone in its own terminal. ws-server auto-resolves the artefact directory by walking up from cwd to the workspace `Cargo.toml`, so it can be launched from any directory inside the repo (project root, `web/`, `crates/ws-server/`, ...) and will read the same `dashboard_runs/` Python writes to. Set `BOILINGSIM_ARTIFACTS_DIR=/abs/path` to override explicitly. The startup log echoes the resolved absolute path plus which mechanism produced it.
 
 **Windows (PowerShell):**
 

@@ -65,17 +65,25 @@ export function App() {
   const [camera, setCamera] = useState<CameraPose>(initialShareState.camera);
   const [showDebug, setShowDebug] = useState(false);
 
+  // Tracks the wall-clock time of the most recent imperative push to
+  // Python's heat flux -- either a user slider drag (commitHeatFlux in
+  // ControlPanel routes through handleParamsChange below) or the
+  // initial URL → Python seeding effect. The continuous sync effect
+  // below uses this to refuse to overwrite params during the ~1-2
+  // frames of snapshot lag after such a push, so the slider doesn't
+  // visually snap back to the old value before Python catches up.
+  const lastImperativeFluxChangeRef = useRef(0);
+
   // Seed Python with URL-derived params once the WS is open, for
   // fields that differ from the scenario default.
   const seededRef = useRef(false);
-  const heatFluxSeededFromUrlRef = useRef(false);
   useEffect(() => {
     if (seededRef.current || connectionState !== "open") return;
     seededRef.current = true;
     const d = DEFAULT_SHARE_STATE.params;
     if (params.heatFluxWPerM2 !== d.heatFluxWPerM2) {
       sendCommand({ type: "set_heat_flux", value: params.heatFluxWPerM2 });
-      heatFluxSeededFromUrlRef.current = true;
+      lastImperativeFluxChangeRef.current = Date.now();
     }
     if (params.material !== d.material) {
       sendCommand({ type: "set_material", value: params.material });
@@ -92,28 +100,38 @@ export function App() {
     }
   }, [connectionState, params, sendCommand]);
 
-  // Pull the sim's actual wall_heat_flux into params on first snapshot
-  // when URL didn't already pin the slider to a non-default value.
-  // Without this, opening the dashboard against a sim running at the
-  // YAML default flux (e.g. q = 60 or 80 kW/m²) leaves the slider
-  // stuck at the share-default 30 while the sidebar overlay and the
-  // bottom heat-flux chart — both reading directly from the snapshot —
-  // correctly show the live sim value. The mismatch confused users
-  // into thinking their slider edit hadn't taken effect when in fact
-  // the slider had never been synced to reality in the first place.
-  const heatFluxSyncedRef = useRef(false);
+  // Continuously mirror the sim's actual wall_heat_flux onto the
+  // slider's params. Without this, ANY code path that mutates flux
+  // outside the ControlPanel slider — the YAML/cfg load on producer
+  // start-up, the Configuration page's `set_config` apply, a future
+  // warm-restart message — leaves the slider showing a stale value
+  // while the sidebar overlay and bottom heat-flux chart (both reading
+  // directly from `snapshot.wall_heat_flux`) correctly show the live
+  // value. The 1.5 s lockout after an imperative push (slider drag or
+  // initial URL seeding) prevents the snapshot lag from snapping the
+  // slider back to the pre-push value.
   useEffect(() => {
-    if (heatFluxSyncedRef.current) return;
     if (!snapshot) return;
-    heatFluxSyncedRef.current = true;
-    // If URL specified a non-default flux, the seeding effect above
-    // already pushed it to Python — trust the URL as authoritative.
-    if (heatFluxSeededFromUrlRef.current) return;
+    if (Date.now() - lastImperativeFluxChangeRef.current < 1500) return;
     const live = snapshot.wall_heat_flux;
     if (Math.abs(live - params.heatFluxWPerM2) > 50) {
       setParams((p) => ({ ...p, heatFluxWPerM2: live }));
     }
-  }, [snapshot, params.heatFluxWPerM2]);
+  }, [snapshot?.wall_heat_flux, params.heatFluxWPerM2]);
+
+  // Wraps `setParams` to bump the imperative-change timestamp whenever
+  // the slider drag changes the heat flux. Passed to LivePage as
+  // `onParamsChange` instead of the raw `setParams` so the continuous
+  // sync above can tell the difference between "user moved it" (skip
+  // sync briefly) and "snapshot disagrees with stored params" (sync).
+  const handleParamsChange = useCallback((next: ShareableParams) => {
+    setParams((prev) => {
+      if (next.heatFluxWPerM2 !== prev.heatFluxWPerM2) {
+        lastImperativeFluxChangeRef.current = Date.now();
+      }
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     pushShareState({ params, camera });
@@ -167,7 +185,7 @@ export function App() {
             historyVersion={historyVersion}
             sendCommand={sendCommand}
             params={params}
-            onParamsChange={setParams}
+            onParamsChange={handleParamsChange}
             initialCamera={initialShareState.camera}
             onCameraChange={handleCameraChange}
             onCopyShareLink={handleCopyShareLink}

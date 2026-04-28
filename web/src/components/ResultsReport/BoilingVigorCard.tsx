@@ -64,6 +64,17 @@ export function BoilingVigorCard({ scalars }: Props) {
     [scalars],
   );
 
+  // See HeatUpStorylineCard for the rationale -- a milestone outside
+  // the data's t range produces a garbled clipped label on the y-axis.
+  const tMin = data.length > 0 ? data[0].t : -Infinity;
+  const tMax = data.length > 0 ? data[data.length - 1].t : Infinity;
+  const tSat =
+    milestones.tSat !== undefined
+    && milestones.tSat >= tMin
+    && milestones.tSat <= tMax
+      ? milestones.tSat
+      : undefined;
+
   return (
     <ChartCard
       name="boiling_vigor"
@@ -96,10 +107,10 @@ export function BoilingVigorCard({ scalars }: Props) {
               stroke={colors.flux}
               tick={{ fontSize: 10, fill: colors.axis }}
             />
-            {milestones.tSat !== undefined ? (
+            {tSat !== undefined ? (
               <ReferenceLine
                 yAxisId="count"
-                x={milestones.tSat}
+                x={tSat}
                 stroke={colors.cool}
                 strokeDasharray="2 4"
                 label={{

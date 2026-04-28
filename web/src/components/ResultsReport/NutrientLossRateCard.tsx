@@ -55,10 +55,21 @@ export function NutrientLossRateCard({ scalars, summary }: Props) {
   const primaryName = summary.nutrient_primary_name || "primary";
   const secondaryName = summary.nutrient_secondary_name || "secondary";
 
+  // See HeatUpStorylineCard for the rationale -- a milestone outside
+  // the data's t range produces a garbled clipped label on the y-axis.
+  const tMin = data.length > 0 ? data[0].t : -Infinity;
+  const tMax = data.length > 0 ? data[data.length - 1].t : Infinity;
+  const tSat =
+    milestones.tSat !== undefined
+    && milestones.tSat >= tMin
+    && milestones.tSat <= tMax
+      ? milestones.tSat
+      : undefined;
+
   return (
     <ChartCard
       name="nutrient_loss_rate"
-      title="Nutrient loss-rate"
+      title="Nutrient loss-rate (%/min)"
       subtitle="d/dt(retention) -- positive when nutrient is leaving the carrot"
     >
       <div className="report-card__body--chart" style={{ height: 240 }}>
@@ -74,24 +85,27 @@ export function NutrientLossRateCard({ scalars, summary }: Props) {
               tick={{ fontSize: 10, fill: colors.axis }}
               unit="s"
             />
+            {/* `%/min` unit moved into the card title (above) to keep
+                this y-axis as a clean tick column. The previous
+                `label={{ value: "%/min", angle: -90, position:
+                "insideLeft" }}` overlapped the tick labels — at small
+                rate scales (0.0..0.8 %/min) Recharts spaced the
+                ticks tightly enough that the rotated unit-text and
+                the numeric tick labels rendered on top of each other,
+                producing the apparent "0.8 / 0.8 / 0.8 / 0.8" stack. */}
             <YAxis
               stroke={colors.axis}
               tick={{ fontSize: 10, fill: colors.axis }}
-              label={{
-                value: "%/min",
-                angle: -90,
-                position: "insideLeft",
-                style: { fill: colors.axis, fontSize: 10 },
-              }}
+              width={42}
             />
             <ReferenceLine
               y={0}
               stroke={colors.axis}
               strokeOpacity={0.5}
             />
-            {milestones.tSat !== undefined ? (
+            {tSat !== undefined ? (
               <ReferenceLine
-                x={milestones.tSat}
+                x={tSat}
                 stroke={colors.cool}
                 strokeDasharray="2 4"
                 label={{

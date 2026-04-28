@@ -64,7 +64,17 @@ async fn main() -> anyhow::Result<()> {
     info!("  websocket: ws://{addr}/stream");
     info!("  ingest   : {}", ingest::DEFAULT_INGEST_ADDR);
     info!("  control  : {}", control_forward::DEFAULT_CONTROL_ADDR);
-    info!("  artefacts: {}", runs::artefact_dir().display());
+    {
+        // Resolve + canonicalise so the operator can verify at a glance
+        // that ws-server and the Python producer are reading/writing
+        // the same physical directory. The historical
+        // `artefacts: ./dashboard_runs` line hid a recurring footgun
+        // where ws-server's cwd-relative default drifted from Python's
+        // absolute project-root default — see runs::artefact_dir docs.
+        let (path, source) = runs::artefact_dir_with_source();
+        let resolved = path.canonicalize().unwrap_or(path);
+        info!("  artefacts: {} ({})", resolved.display(), source.label());
+    }
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

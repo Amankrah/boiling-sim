@@ -581,8 +581,20 @@ select {
   min-height: 0;
 }
 
+/* Pin chart bodies to a fixed 240px regardless of whether the modifier
+   is applied to the outer body (single-div pattern: MassPartition,
+   Thermal, MassBalance, Bubbles) or to an inner wrapper inside the
+   outer flex body (double-div pattern: HeatUp, BoilingVigor,
+   NutrientLossRate, FinalPartitionDonut via ChartCard).
+   `flex: 0 0 240px` overrides the inherited `flex: 1; min-height: 0`
+   from `.report-card__body`, which otherwise collapses the chart body
+   to zero height in column-flex contexts where the row has no other
+   content forcing a minimum. ResponsiveContainer needs a measurable
+   parent height, so without this override the four top-row cards
+   render header-only with no visible chart. */
 .report-card__body--chart {
   height: 240px;
+  flex: 0 0 240px;
 }
 
 /* ChartCard additions: subtitle next to the title, right-side cluster
