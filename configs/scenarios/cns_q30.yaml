@@ -1,0 +1,60 @@
+# 2026 CNS conference power sweep -- low/simmer point.
+# Fork of cns_demo.yaml; only heating.base_heat_flux_w_per_m2 differs.
+# 30 kW/m^2 = ~942 W = small/simmer residential burner setting.
+# Water reaches T_sat slowly (or not at all in 900 s) -- expect very high
+# retention because Arrhenius cliff is barely crossed in the carrot core.
+pot:
+  diameter_m: 0.20
+  height_m: 0.12
+  wall_thickness_m: 0.003
+  base_thickness_m: 0.005
+  material: steel_304
+
+water:
+  fill_fraction: 0.75
+  initial_temp_c: 20.0
+
+carrot:
+  diameter_m: 0.025
+  length_m: 0.05
+  position: [0.0, 0.0, 0.03]
+  initial_beta_carotene_mg_per_100g: 8.3
+
+heating:
+  base_heat_flux_w_per_m2: 30000.0  # ~942 W -- simmer burner
+  ambient_temp_c: 22.0
+
+grid:
+  dx_m: 0.001
+  carrot_mesh_resolution: 40
+
+solver:
+  cfl_safety_factor: 0.4
+  max_dt_s: 0.1
+  pressure_tol: 1.0e-5
+  pressure_max_iter: 200
+  diffusion_tol: 1.0e-4
+  diffusion_max_iter: 50
+  h_conv_outer_w_per_m2_k: 10.0
+
+boiling:
+  enabled: true
+  dT_onb_k: 5.0
+  contact_angle_rad: 1.0
+  max_bubbles: 100000
+  initial_bubble_radius_m: 1.0e-5
+  nucleation_probability_per_step: 0.1
+  C_sf_rohsenow: 0.013
+  Pr_n_rohsenow: 1.0
+
+nutrient:
+  enabled: true
+  E_a_kJ_per_mol: 70.0
+  k0_per_s: 2.63e6
+  D_eff_m2_per_s: 2.0e-10
+  K_partition: 1.0e-5
+  C0_mg_per_kg: 83.0
+  C_water_sat_mg_per_kg: 6.0e-3
+
+total_time_s: 900.0
+output_every_s: 0.1
