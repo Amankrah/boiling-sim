@@ -346,7 +346,7 @@ def water_pool_fraction(grid: "Grid", cfg: "ScenarioConfig") -> float:
     Concentration units cancel because both C and C_water use the same
     (mg/kg, "abstract concentration"), and cell volumes are uniform.
 
-    This + :func:`retention_fraction` partition every β-carotene atom by its
+    This + :func:`retention_fraction` partition every beta-carotene atom by its
     current location:
 
         retention_fraction      -> fraction still in carrot
@@ -783,7 +783,7 @@ def advect_c_water(
 
     c_self = C_water[i, j, k]
     d_C = float(0.0)
-    alpha = dt / dx  # converts (u * C) [mg*m/kg/s] to ΔC [mg/kg] per face
+    alpha = dt / dx  # converts (u * C) [mg*m/kg/s] to dC [mg/kg] per face
 
     # ---- x direction ----
     # Left face at index i (velocity ux[i,j,k])
@@ -894,7 +894,7 @@ def clamp_c_water_and_track_precipitation(
     ``max(C_water)`` cannot grow) only when the transporting velocity is
     exactly divergence-free. Our pressure-projection Jacobi solver is run
     to ``pressure_tol = 1e-5`` (not machine precision), so every step
-    leaves a small residual ``∇·u``. Over ~90k steps at ``dt ~ 1 ms`` this
+    leaves a small residual ``div(u)``. Over ~90k steps at ``dt ~ 1 ms`` this
     accumulates at stagnation cells (wall cul-de-sacs, bubble-plume
     convergence zones) and locally concentrates ``C_water`` 10-300x above
     ``C_water_sat``. The fluid-mean stays far below the cap -- this is a
@@ -910,8 +910,17 @@ def clamp_c_water_and_track_precipitation(
     exact: ``retention + leached + degraded + precipitated = 100 %%``.
 
     Also handles the rare ``C_water < 0`` case from float accumulation at
-    near-zero cells; negative mass gets zeroed and its magnitude is added
-    to the precipitated counter (a tiny positive sink).
+    near-zero cells: the cell is silently clamped to 0 (recovering the
+    numerical leak) WITHOUT crediting precipitated_total. Earlier
+    revisions did add ``|c|`` to the counter to keep the four-bucket sum
+    at exactly 100 %, but that double-counted a single noise event as
+    both extra leached mass (from zeroing the cell) and extra
+    precipitation (from the atomic_add) -- for a high-Csat solute like
+    vitamin C (Csat = 1e6 mg/kg) the c>Csat branch never fires so the
+    counter accumulated only this spurious noise, blowing past 40 000 %
+    over a few-thousand-step dashboard run. The four-bucket sum now
+    closes only modulo numerical-noise residual, which lands in the
+    signed ``degraded`` bucket where it's visibly diagnostic.
     """
     i, j, k = wp.tid()
     c = C_water[i, j, k]
@@ -919,7 +928,6 @@ def clamp_c_water_and_track_precipitation(
         wp.atomic_add(precipitated_total, 0, c - C_water_sat)
         C_water[i, j, k] = C_water_sat
     elif c < float(0.0):
-        wp.atomic_add(precipitated_total, 0, -c)
         C_water[i, j, k] = float(0.0)
 
 

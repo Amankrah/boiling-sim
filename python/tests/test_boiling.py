@@ -178,6 +178,42 @@ def test_cole_frequency_water_steel_in_literature_range():
     assert 20.0 <= f_hz <= 100.0, f"f = {f_hz:.1f} Hz outside [20, 100] Hz"
 
 
+def _terminal_slip_mps(R_m: float) -> float:
+    """Python-side mirror of @wp.func terminal_slip_velocity (power-law fit
+    to Clift-Grace-Weber 1978, capped at the plateau)."""
+    v_pow = 391.0 * (R_m ** 1.26)
+    return 0.22 if v_pow > 0.22 else v_pow
+
+
+def test_terminal_slip_seed_bubble_is_small():
+    """At R = 50 um the curve gives v ~ 5 mm/s, two orders of magnitude
+    below the old constant 0.2 m/s. Pre-M1 a seed bubble would zoom
+    around at 200 mm/s; now it barely rises on its own and rides the
+    fluid u instead."""
+    v = _terminal_slip_mps(50.0e-6)
+    assert 1.0e-3 <= v <= 1.0e-2, f"v(50 um) = {v*1000:.2f} mm/s outside [1, 10]"
+
+
+def test_terminal_slip_plateau_at_3mm():
+    """At R = 3 mm a clean-water bubble is in the wave-controlled
+    plateau ~0.22 m/s (Grace 1976 / Clift-Grace-Weber 1978)."""
+    v = _terminal_slip_mps(3.0e-3)
+    assert v == 0.22, f"v(3 mm) = {v:.3f} m/s should be plateau 0.22"
+
+
+def test_terminal_slip_monotonic_below_plateau():
+    """The curve must be monotonically non-decreasing in R (a bigger
+    bubble can't rise slower than a smaller one). Sweeps R from 10 um
+    to plateau and asserts no decrease."""
+    R_grid = [1e-5, 5e-5, 1e-4, 3e-4, 5e-4, 7e-4, 1e-3, 2e-3, 5e-3]
+    vs = [_terminal_slip_mps(R) for R in R_grid]
+    for i in range(1, len(vs)):
+        assert vs[i] >= vs[i - 1] - 1.0e-9, (
+            f"slip not monotonic: v({R_grid[i-1]*1000} mm)={vs[i-1]:.4f} "
+            f"> v({R_grid[i]*1000} mm)={vs[i]:.4f}"
+        )
+
+
 def test_mikic_rohsenow_growth_rate_analytic():
     """At ΔT = 10 K, Ja ≈ 31, α_l ≈ 1.45e-7 m²/s; R(10 ms) ≈ 1.3 mm.
 
@@ -766,3 +802,232 @@ def test_no_condensation_when_fluid_at_saturation():
     assert out["radius"] == pytest.approx(R0, rel=1.0e-5), (
         f"bubble radius at T_sat drifted: expected {R0}, got {out['radius']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 M2: Rayleigh-Taylor binary fragmentation
+# ---------------------------------------------------------------------------
+
+
+def test_fragmentation_splits_into_two_volume_conserving_daughters():
+    """A bubble flagged with R > R_frag should split into 2 active
+    bubbles whose summed volume equals the parent's. Daughter radii
+    R_d = R / 2^(1/3) = 0.7937 R."""
+    from boilingsim.boiling import (
+        seed_test_bubble, step_fragment_bubbles,
+    )
+    import math
+
+    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg.boiling.enabled = True
+    cfg.boiling.max_bubbles = 16
+    cfg.boiling.fragmentation_radius_m = 4.0e-3
+    cfg.grid.dx_m = 0.002
+    grid = build_pot_geometry(cfg)
+    pool = grid.bubbles
+
+    # Seed one bubble at 5 mm with a non-zero velocity so the
+    # perpendicular-axis logic picks a deterministic direction.
+    R_parent = 5.0e-3
+    seed_test_bubble(pool, slot=0, position=(0.0, 0.0, 0.05),
+                     velocity=(0.0, 0.0, 0.2),
+                     radius=R_parent, birth_time=0.0)
+    # Manually flag the bubble for fragmentation (bypassing update_bubbles
+    # so this test only exercises the fragment kernel itself).
+    nf = pool.needs_fragment.numpy()
+    nf[0] = 1
+    pool.needs_fragment.assign(nf)
+
+    step_fragment_bubbles(pool, cfg)
+    wp.synchronize()
+
+    bubbles = pool.bubbles.numpy()
+    active = bubbles[bubbles["active"] == 1]
+    assert len(active) == 2, f"expected 2 daughters, got {len(active)}"
+
+    R_expected = R_parent * (0.5 ** (1.0 / 3.0))
+    for b in active:
+        assert b["radius"] == pytest.approx(R_expected, rel=1.0e-5), (
+            f"daughter R = {b['radius']*1000:.4f} mm, expected "
+            f"{R_expected*1000:.4f} mm"
+        )
+
+    # Volume conservation: V_parent = sum(V_daughters)
+    V_parent = (4.0 / 3.0) * math.pi * R_parent ** 3
+    V_daughters = sum((4.0 / 3.0) * math.pi * float(b["radius"]) ** 3
+                       for b in active)
+    rel_err = abs(V_parent - V_daughters) / V_parent
+    assert rel_err < 1.0e-5, (
+        f"volume not conserved: parent={V_parent:.6e} m^3, "
+        f"daughters={V_daughters:.6e} m^3, err={rel_err:.2e}"
+    )
+
+
+def test_fragmentation_pool_full_graceful_degradation():
+    """If no daughter slot is available, the parent stays at full radius
+    (the R_max safety cap will clamp it). No crash, no corruption."""
+    from boilingsim.boiling import (
+        seed_test_bubble, step_fragment_bubbles,
+    )
+
+    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg.boiling.enabled = True
+    cfg.boiling.max_bubbles = 4   # tiny pool to force exhaustion
+    cfg.boiling.fragmentation_radius_m = 4.0e-3
+    cfg.grid.dx_m = 0.002
+    grid = build_pot_geometry(cfg)
+    pool = grid.bubbles
+
+    # Fill all 4 slots; only slot 0 will be flagged for fragmentation.
+    for s in range(4):
+        seed_test_bubble(pool, slot=s, position=(0.0, 0.0, 0.05),
+                         velocity=(0.0, 0.0, 0.2),
+                         radius=5.0e-3, birth_time=0.0)
+    nf = pool.needs_fragment.numpy()
+    nf[0] = 1
+    pool.needs_fragment.assign(nf)
+
+    n_active_before = pool.count_active()
+    step_fragment_bubbles(pool, cfg)
+    wp.synchronize()
+    n_active_after = pool.count_active()
+
+    # Pool was full; fragmentation couldn't claim a daughter slot. Count
+    # stays the same; flag was consumed; parent's radius is unchanged.
+    assert n_active_after == n_active_before, (
+        f"pool count changed unexpectedly: {n_active_before} -> {n_active_after}"
+    )
+    assert pool.needs_fragment.numpy()[0] == 0, (
+        "needs_fragment flag should be cleared even when fragmentation fails"
+    )
+    out = pool.bubbles.numpy()[0]
+    assert out["radius"] == pytest.approx(5.0e-3, rel=1.0e-5), (
+        f"parent radius drifted in pool-full case: {out['radius']*1000:.4f} mm"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 M3: spatial-hash coalescence
+# ---------------------------------------------------------------------------
+
+
+def test_coalescence_merges_overlapping_bubbles():
+    """Two bubbles whose centres are within R1 + R2 should merge into one
+    survivor with R = (R1^3 + R2^3)^(1/3) and momentum-weighted velocity."""
+    from boilingsim.boiling import (
+        seed_test_bubble, step_coalesce_bubbles,
+    )
+    import math
+
+    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg.boiling.enabled = True
+    cfg.boiling.max_bubbles = 16
+    cfg.boiling.coalescence_enabled = True
+    cfg.grid.dx_m = 0.002
+    grid = build_pot_geometry(cfg)
+    pool = grid.bubbles
+
+    R1, R2 = 1.5e-3, 2.0e-3
+    # Centres 2 mm apart, sum of radii is 3.5 mm -> overlapping.
+    seed_test_bubble(pool, slot=0, position=(0.0, 0.0, 0.05),
+                     velocity=(0.0, 0.0, 0.2),
+                     radius=R1, birth_time=1.0)
+    seed_test_bubble(pool, slot=1, position=(0.002, 0.0, 0.05),
+                     velocity=(0.0, 0.0, 0.1),
+                     radius=R2, birth_time=2.0)
+
+    step_coalesce_bubbles(pool, cfg)
+    wp.synchronize()
+
+    bubbles = pool.bubbles.numpy()
+    active = bubbles[bubbles["active"] == 1]
+    assert len(active) == 1, f"expected 1 survivor, got {len(active)}"
+
+    survivor = active[0]
+    R_expected = (R1 ** 3 + R2 ** 3) ** (1.0 / 3.0)
+    assert survivor["radius"] == pytest.approx(R_expected, rel=1.0e-4), (
+        f"survivor R = {survivor['radius']*1000:.4f} mm, expected "
+        f"{R_expected*1000:.4f} mm"
+    )
+
+    # Volume conservation: V_survivor = V1 + V2.
+    V1 = (4.0 / 3.0) * math.pi * R1 ** 3
+    V2 = (4.0 / 3.0) * math.pi * R2 ** 3
+    V_surv = (4.0 / 3.0) * math.pi * float(survivor["radius"]) ** 3
+    rel_err = abs((V1 + V2) - V_surv) / (V1 + V2)
+    assert rel_err < 1.0e-4, (
+        f"volume not conserved: V1+V2={V1+V2:.6e}, V_survivor={V_surv:.6e}"
+    )
+
+    # Momentum-weighted velocity: v_z should land between 0.1 and 0.2 m/s,
+    # weighted by volume. v_expected = (V1*0.2 + V2*0.1) / (V1+V2).
+    v_expected_z = (V1 * 0.2 + V2 * 0.1) / (V1 + V2)
+    assert survivor["velocity"][2] == pytest.approx(v_expected_z, rel=1.0e-4), (
+        f"v_z = {survivor['velocity'][2]:.4f}, expected {v_expected_z:.4f}"
+    )
+
+    # birth_time inherits the OLDER (smaller value).
+    assert survivor["birth_time"] == pytest.approx(1.0, rel=1.0e-6), (
+        f"birth_time = {survivor['birth_time']}, expected min(1.0, 2.0) = 1.0"
+    )
+
+
+def test_coalescence_does_not_merge_separated_bubbles():
+    """Two bubbles with centres farther apart than R1 + R2 must NOT merge."""
+    from boilingsim.boiling import (
+        seed_test_bubble, step_coalesce_bubbles,
+    )
+
+    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg.boiling.enabled = True
+    cfg.boiling.max_bubbles = 16
+    cfg.boiling.coalescence_enabled = True
+    cfg.grid.dx_m = 0.002
+    grid = build_pot_geometry(cfg)
+    pool = grid.bubbles
+
+    R1, R2 = 1.0e-3, 1.0e-3
+    # Centres 5 mm apart, sum of radii is 2 mm -> well separated.
+    seed_test_bubble(pool, slot=0, position=(0.0, 0.0, 0.05),
+                     velocity=(0.0, 0.0, 0.0),
+                     radius=R1, birth_time=0.0)
+    seed_test_bubble(pool, slot=1, position=(0.005, 0.0, 0.05),
+                     velocity=(0.0, 0.0, 0.0),
+                     radius=R2, birth_time=0.0)
+
+    step_coalesce_bubbles(pool, cfg)
+    wp.synchronize()
+
+    bubbles = pool.bubbles.numpy()
+    n_active = int((bubbles["active"] == 1).sum())
+    assert n_active == 2, f"separated bubbles wrongly merged: {n_active} active"
+
+
+def test_coalescence_disabled_is_noop():
+    """When ``coalescence_enabled=False`` the kernel pass is skipped
+    entirely -- two overlapping bubbles must remain two."""
+    from boilingsim.boiling import (
+        seed_test_bubble, step_coalesce_bubbles,
+    )
+
+    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg.boiling.enabled = True
+    cfg.boiling.max_bubbles = 16
+    cfg.boiling.coalescence_enabled = False
+    cfg.grid.dx_m = 0.002
+    grid = build_pot_geometry(cfg)
+    pool = grid.bubbles
+
+    seed_test_bubble(pool, slot=0, position=(0.0, 0.0, 0.05),
+                     velocity=(0.0, 0.0, 0.0),
+                     radius=1.5e-3, birth_time=0.0)
+    seed_test_bubble(pool, slot=1, position=(0.001, 0.0, 0.05),
+                     velocity=(0.0, 0.0, 0.0),
+                     radius=2.0e-3, birth_time=0.0)
+
+    step_coalesce_bubbles(pool, cfg)
+    wp.synchronize()
+
+    bubbles = pool.bubbles.numpy()
+    n_active = int((bubbles["active"] == 1).sum())
+    assert n_active == 2, f"coalescence ran with disabled flag: {n_active} active"

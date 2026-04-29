@@ -150,7 +150,59 @@ class BoilingConfig(BaseModel):
     )
     initial_bubble_radius_m: float = Field(
         1.0e-5, gt=0.0,
-        description="Seed radius at nucleation (10 μm is typical cavity mouth size).",
+        description="Seed radius at nucleation (10 um is typical cavity mouth size).",
+    )
+    max_bubble_radius_m: float = Field(
+        5.0e-3, gt=0.0,
+        description=(
+            "Safety floor on bubble radius. Mikic-Rohsenow growth is "
+            "monotonic in age and unbounded; without a cap, a bubble that "
+            "gets stuck in a stagnation zone keeps inflating until it vents. "
+            "5 mm is the published Rayleigh-Taylor fragmentation threshold "
+            "for water at 1 atm (Levich 1962, Clift-Grace-Weber 1978). "
+            "With fragmentation enabled (fragmentation_radius_m below the "
+            "cap), this cap should rarely fire."
+        ),
+    )
+    fragmentation_radius_m: float = Field(
+        4.0e-3, gt=0.0,
+        description=(
+            "Bubble radius at which a Rayleigh-Taylor breakup event splits "
+            "the bubble into two equal-volume daughters (R_d = R / 2^(1/3) "
+            "= R * 0.794). Set below max_bubble_radius_m so the split fires "
+            "before the safety cap clamps. Real bubbles in water at 1 atm "
+            "fragment in the 5-7 mm range; 4 mm is conservative."
+        ),
+    )
+    coalescence_enabled: bool = Field(
+        True,
+        description=(
+            "Master switch for the spatial-hash coalescence pass. When two "
+            "bubble centres come within R1+R2 they merge into a single "
+            "volume-conserving bubble (R = (R1^3+R2^3)^(1/3), momentum-"
+            "weighted velocity). Costs ~3 extra kernel launches per step; "
+            "expected to be < 5 % of step time at typical pool sizes."
+        ),
+    )
+    coalescence_bin_size_m: float = Field(
+        12.0e-3, gt=0.0,
+        description=(
+            "Spatial-hash bin edge length for the coalescence pass. Should "
+            "be at least 2 * max_bubble_radius_m so that any pair of "
+            "overlapping bubbles is in the same bin or in immediate "
+            "neighbours. Default 12 mm = 2.4x the 5 mm cap."
+        ),
+    )
+    coalescence_max_per_bin: int = Field(
+        64, gt=0,
+        description=(
+            "Per-bin capacity for the spatial-hash bubble lookup table. "
+            "If a bin overflows (more bubbles than this in one bin) the "
+            "extras simply skip coalescence detection that step -- they "
+            "get another shot next step. With 12 mm bins and 1.5 mm "
+            "bubbles, max physical packing is ~30; 64 leaves comfortable "
+            "headroom."
+        ),
     )
     nucleation_probability_per_step: float = Field(
         0.1, gt=0.0, le=1.0,

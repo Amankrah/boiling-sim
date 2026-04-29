@@ -100,6 +100,34 @@ Steel is the slowest because it has the highest peak bubble count (~10 k mid-run
 
 Original `q = 30 kW/m²` calibration runs (preserved in the Phase 3.2 q-sweep below) were ~3× faster: 2.0–2.6 s/sim-s.
 
+### Thermal throttling on long sessions
+
+The 6.74 s/sim-s steel number is the **cold-GPU first-run value**. Repeating the same `default.yaml` run after ~30 minutes of sustained `q40` / `q50` load drifts to **8.27 s/sim-s** (+23 %) on RTX 6000 Ada. Step counts are identical (≈226 k); the entire delta is per-step cost (5.36 → 6.53 ms/step). All physics invariants — Rohsenow ratio, ΔT_w, departure diameter, mass-balance triple — are bit-identical between runs. **This is GPU clock throttling under sustained load, not code drift.** When publishing s/sim-s numbers, distinguish "cold-GPU baseline" from "thermally-saturated long-soak". The headline 6.74 / 4.30 / 4.32 figures above are cold-GPU.
+
+### Per-step breakdown (Phase 7 M1 profile, post-M2)
+
+`scripts/profile_step.py` wraps each step phase with a `wp.synchronize_device` pair and reports the share. Steady-state at `default.yaml` q = 80, dx = 2 mm, ~8000 active bubbles:
+
+| Phase                | mean ms/step | %     |
+|----------------------|-------------:|------:|
+| pressure_projection  |         4.70 | 55.4  |
+| conduct_one_step     |         2.05 | 24.2  |
+| advect_all           |         0.37 |  4.3  |
+| step_bubbles         |         0.36 |  4.2  |
+| wall_boiling_flux    |         0.28 |  3.3  |
+| buoyancy             |         0.27 |  3.2  |
+| no_slip_pre+post     |         0.37 |  4.3  |
+| compute_dt           |         0.09 |  1.1  |
+
+Pressure projection (Jacobi at `pressure_max_iter = 100`) is the dominant cost; the bubble pipeline is only 4 %. The audit pre-hypothesis that the 9e7c6fb condensation atomics dominate did not survive measurement.
+
+### Phase 7 optimization log
+
+- **M1** — `scripts/profile_step.py` + opt-in profiling hook in `Simulation` (env-gated `BOILINGSIM_PROFILE=1`). Per-phase `wp.synchronize_device` pairs; ranked CSV at `benchmarks/profile_step_breakdown.csv`. Zero overhead when off.
+- **M2** — `compute_dt` host-readback caching. Was 1.46 ms/step (14.5 %) due to `ws.u_max_scalar.numpy()[0]` host sync; now 0.09 ms/step (1.1 %) with K = 8 step refresh cadence. cfl_safety_factor = 0.4 gives ~2.5× CFL headroom, well above any plausible 8-step `u_max` excursion. Override via `BOILINGSIM_DT_REFRESH=N` (set N = 1 to disable). Net: ~13 % step-time reduction; physics unchanged across 137/137 tests.
+- **M3 / M4 (deferred)** — condensation gating + bubble-pool compaction. The profile shows `step_bubbles` is only 4.2 % of step time even at full saturation, so even halving it is < 2 % overall. Not worth the complexity; revisit if `pressure_projection` ever drops below ~30 %.
+- **M5 (deferred Phase 7+)** — multigrid pressure projection. Only large remaining lever (replace 100-iter Jacobi → 3–4-level V-cycle). Multi-week project; flagged but not in scope.
+
 ## Changes shipped this phase (final state)
 
 - `python/boilingsim/config.py` — `BoilingConfig`, plus `SolverConfig.h_evap_free_surface_w_per_m2_k` and `f_bulk_evap_per_s` for the open-pot BC.

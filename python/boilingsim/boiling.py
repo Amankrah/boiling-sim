@@ -149,6 +149,35 @@ def cole_frequency(D_d: float, g_mag: float,
 
 
 @wp.func
+def terminal_slip_velocity(R: float) -> float:
+    """Radius-dependent terminal rise velocity for a water bubble.
+
+    Replaces the constant 0.2 m/s slip used through Phase 3, which was
+    the Grace-1976 plateau for ~2.5 mm bubbles. Real terminal velocity
+    spans 2-3 orders of magnitude across the radii in our pool: at
+    R=50 um, v ~ 5 mm/s; at R=1 mm, v ~ 220 mm/s; plateau above that.
+
+    Power-law fit to clean-water-bubble data (Clift-Grace-Weber 1978,
+    figure 7.3) anchored on (R=50 um, v=5 mm/s) and (R=1 mm, v=220 mm/s):
+        v(R) = 391 * R^1.26  [m/s, R in m]
+    capped at the wave-controlled plateau v_plateau = 0.22 m/s for
+    R >= 1 mm. The exponent 1.26 is gentler than Stokes (R^2) because
+    real bubbles transition out of Stokes drag around Re ~ 1 (R ~ 50 um);
+    the curve absorbs the Re correction empirically rather than solving
+    the drag balance self-consistently.
+
+    Anchor on water at 100 C; the same form is within ~30 % for water
+    at 25-100 C, which is good enough for our visualization purposes.
+    For other fluids (e.g. milk), the plateau and exponent would shift
+    with the Bond / Morton numbers; not in scope.
+    """
+    v_pow = 391.0 * wp.pow(R, 1.26)
+    if v_pow > 0.22:
+        return 0.22
+    return v_pow
+
+
+@wp.func
 def mikic_rohsenow_radius(age_s: float, T_local_k: float, T_sat_k: float,
                            rho_l: float, rho_v: float, cp_l: float,
                            k_l: float, h_lv: float) -> float:
@@ -217,6 +246,16 @@ class BubblePool:
     slot_claim: wp.array              # int1d, length max_bubbles; per-slot claim flag (0=free, 1=claimed)
     site_active: wp.array             # int3d, (nx, ny, nz); 1 = bubble at this nucleation cell
     nucleation_table: wp.array        # float1d, length _N_ENTRIES; N_a(delta T) LUT
+    needs_fragment: wp.array          # int1d, length max_bubbles; 1 = flagged for fragmentation this step (M2)
+    # Phase 8 M3: spatial-hash coalescence workspace.
+    bin_counts: wp.array              # int1d, (n_bins,); bubble count per bin this step
+    bin_lists: wp.array               # int2d, (n_bins, max_per_bin); bubble indices per bin
+    merge_target: wp.array            # int1d, (max_bubbles,); 0 = not absorbed, else absorber_idx + 1
+    n_bins_x: int
+    n_bins_y: int
+    n_bins_z: int
+    bin_size_m: float
+    bin_origin: tuple                 # (ox, oy, oz) world-space origin of the bin grid
     max_bubbles: int
     cfg: BoilingConfig
 
@@ -245,15 +284,47 @@ def allocate_bubble_pool(cfg: ScenarioConfig, grid: Grid,
 
     bubbles = wp.zeros(boiling.max_bubbles, dtype=Bubble, device=device)
     slot_claim = wp.zeros(boiling.max_bubbles, dtype=int, device=device)
+    needs_fragment = wp.zeros(boiling.max_bubbles, dtype=int, device=device)
     nx, ny, nz = grid.shape
     site_active = wp.zeros((nx, ny, nz), dtype=int, device=device)
     table = build_nucleation_table(boiling, water_props, device=device)
+
+    # M3 spatial-hash workspace: covers the full grid domain in
+    # ``coalescence_bin_size_m`` cubes. Coverage is generous (1-2 bins
+    # of slack on each side) since bubbles outside the fluid region
+    # would have been deactivated by ``update_bubbles``' wall check.
+    bin_size = float(boiling.coalescence_bin_size_m)
+    domain_x = float(nx) * grid.dx
+    domain_y = float(ny) * grid.dx
+    domain_z = float(nz) * grid.dx
+    n_bins_x = max(1, int(domain_x / bin_size) + 1)
+    n_bins_y = max(1, int(domain_y / bin_size) + 1)
+    n_bins_z = max(1, int(domain_z / bin_size) + 1)
+    n_bins = n_bins_x * n_bins_y * n_bins_z
+    max_per_bin = int(boiling.coalescence_max_per_bin)
+    bin_counts = wp.zeros(n_bins, dtype=int, device=device)
+    bin_lists = wp.zeros((n_bins, max_per_bin), dtype=int, device=device)
+    merge_target = wp.zeros(boiling.max_bubbles, dtype=int, device=device)
+    bin_origin = (
+        float(grid.origin[0]),
+        float(grid.origin[1]),
+        float(grid.origin[2]),
+    )
 
     return BubblePool(
         bubbles=bubbles,
         slot_claim=slot_claim,
         site_active=site_active,
         nucleation_table=table,
+        needs_fragment=needs_fragment,
+        bin_counts=bin_counts,
+        bin_lists=bin_lists,
+        merge_target=merge_target,
+        n_bins_x=n_bins_x,
+        n_bins_y=n_bins_y,
+        n_bins_z=n_bins_z,
+        bin_size_m=bin_size,
+        bin_origin=bin_origin,
         max_bubbles=boiling.max_bubbles,
         cfg=boiling,
     )
@@ -575,6 +646,7 @@ def update_bubbles(
     bubbles: wp.array(dtype=Bubble),
     slot_claim: wp.array(dtype=int),
     site_active: wp.array3d(dtype=int),
+    needs_fragment: wp.array(dtype=int),
     T: wp.array3d(dtype=float),
     mat: wp.array3d(dtype=int),
     ux: wp.array3d(dtype=float),
@@ -596,8 +668,9 @@ def update_bubbles(
     # Physics parameters
     theta_rad: float,
     g_mag: float,
-    slip_velocity: float,
     R_seed: float,
+    R_frag: float,
+    R_max: float,
     mat_fluid: int,
 ):
     """Advance one bubble: Mikic-Rohsenow growth in superheated liquid,
@@ -706,6 +779,18 @@ def update_bubbles(
         else:
             bubble.radius = R_new
 
+    # M2: flag for Rayleigh-Taylor fragmentation when R exceeds R_frag.
+    # The actual split (volume-conserving binary breakup) is handled by
+    # ``fragment_bubbles`` in a separate pass after this kernel, since
+    # claiming a daughter slot requires atomic_cas on the same pool we're
+    # iterating. R_max remains as a safety floor: if the daughter pool
+    # is full and fragmentation can't fire, the cap kicks in instead so
+    # bubbles never exceed R_max regardless of R_frag's value.
+    if bubble.radius > R_frag:
+        needs_fragment[b_idx] = 1
+    if bubble.radius > R_max:
+        bubble.radius = R_max
+
     # Departure check: 2*R >= Fritz D_d.
     D_d = fritz_departure_diameter(theta_rad, sigma, g_mag, rho_l, rho_v)
     departed = (2.0 * bubble.radius >= D_d)
@@ -720,14 +805,17 @@ def update_bubbles(
             bubble.site_cleared = 1
             bubble.departure_radius = bubble.radius
 
-    # Advect: departed bubbles get local fluid velocity + upward slip.
-    # Attached bubbles stay at the nucleation site.
+    # Advect: departed bubbles get local fluid velocity + R-dependent
+    # terminal slip (M1 of bubble-physics plan). Stokes regime for
+    # sub-millimetre bubbles, plateau ~0.22 m/s for 1+ mm. Attached
+    # bubbles stay at the nucleation site.
     if departed:
         u_fluid = _sample_face_u(ux, uy, uz, bubble.position, origin, dx)
+        slip = terminal_slip_velocity(bubble.radius)
         bubble.velocity = wp.vec3(
             u_fluid[0],
             u_fluid[1],
-            u_fluid[2] + slip_velocity,
+            u_fluid[2] + slip,
         )
         bubble.position = bubble.position + bubble.velocity * dt
 
@@ -747,6 +835,363 @@ def update_bubbles(
         return
 
     bubbles[b_idx] = bubble
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 M2: Rayleigh-Taylor binary fragmentation
+# ---------------------------------------------------------------------------
+
+
+@wp.kernel
+def fragment_bubbles(
+    bubbles: wp.array(dtype=Bubble),
+    slot_claim: wp.array(dtype=int),
+    needs_fragment: wp.array(dtype=int),
+    max_bubbles: int,
+    R_frag: float,
+):
+    """Binary breakup of bubbles flagged by ``update_bubbles`` for exceeding
+    R_frag. Each parent splits into two equal-volume daughters at
+    R_d = R / 2^(1/3) = 0.7937 * R, so total volume (and therefore vapor
+    mass and latent-heat reservoir) is conserved exactly.
+
+    Two-pass design avoids race conditions: ``update_bubbles`` flags the
+    parent in ``needs_fragment``; this kernel runs after, so by the time
+    we claim a daughter slot via atomic_cas no concurrent advection or
+    growth touches the same pool entry.
+
+    Daughter placement: offset the two daughters along a perpendicular to
+    the parent's velocity (so they separate sideways from the rise
+    direction, not vertically), each by R_d so their centres are 2*R_d
+    apart -- just touching, not overlapping. Velocities get a small
+    perpendicular jitter (5 % of |v|) so they diverge over time and don't
+    immediately re-coalesce.
+
+    Pool-full graceful degradation: if no free slot is found in 16
+    linear-probe attempts, the parent stays at its (possibly capped)
+    radius and ``needs_fragment`` is cleared. The R_max safety cap
+    handles this case so bubbles never exceed R_max even when
+    fragmentation is starved.
+    """
+    b_idx = wp.tid()
+    if needs_fragment[b_idx] == 0:
+        return
+    needs_fragment[b_idx] = 0  # consume the flag
+
+    bubble = bubbles[b_idx]
+    if bubble.active == 0:
+        return
+    if bubble.radius <= R_frag:
+        return  # state changed (condensed below threshold) before frag fired
+
+    # Volume-conserving binary breakup: 2 * (4/3 * pi * R_d^3) = (4/3 * pi * R^3)
+    # => R_d = R / 2^(1/3) = R * 0.7937005259840998
+    R_daughter = bubble.radius * 0.7937005259840998
+
+    # Perpendicular offset axis: cross product of velocity with the
+    # world axis it's least aligned with, then normalize. Stationary
+    # bubbles (|v| ~ 0) get a fixed +x offset so split is deterministic.
+    v = bubble.velocity
+    abs_vx = wp.abs(v[0])
+    abs_vy = wp.abs(v[1])
+    abs_vz = wp.abs(v[2])
+    perp = wp.vec3(0.0, 0.0, 0.0)
+    if abs_vx <= abs_vy and abs_vx <= abs_vz:
+        perp = wp.vec3(0.0, -v[2], v[1])
+    elif abs_vy <= abs_vz:
+        perp = wp.vec3(-v[2], 0.0, v[0])
+    else:
+        perp = wp.vec3(-v[1], v[0], 0.0)
+    perp_mag = wp.sqrt(perp[0] * perp[0] + perp[1] * perp[1] + perp[2] * perp[2])
+    if perp_mag < 1.0e-12:
+        perp = wp.vec3(R_daughter, 0.0, 0.0)
+        perp_mag = R_daughter
+    inv_mag = R_daughter / perp_mag
+    offset = wp.vec3(perp[0] * inv_mag, perp[1] * inv_mag, perp[2] * inv_mag)
+
+    # Velocity jitter: 5 % of |v| in the perpendicular direction.
+    v_mag = wp.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+    j_scale = 0.05 * v_mag / R_daughter   # so |jitter| = 0.05 |v|
+    jitter = wp.vec3(offset[0] * j_scale, offset[1] * j_scale, offset[2] * j_scale)
+
+    # Try to claim a daughter slot via atomic_cas linear-probing. The
+    # start index is hashed from b_idx so concurrent fragmentations
+    # touch different starting points and rarely contend.
+    h = b_idx * 73856093
+    h = h ^ (h >> 13)
+    h = h * 1274126177
+    start = (h & 2147483647) % max_bubbles
+
+    daughter_slot = int(-1)
+    for attempt in range(16):
+        cand = (start + attempt) % max_bubbles
+        if cand != b_idx:
+            old = wp.atomic_cas(slot_claim, cand, 0, 1)
+            if old == 0:
+                daughter_slot = cand
+                break
+
+    if daughter_slot < 0:
+        return  # pool full; parent stays at full radius (R_max cap clamps it)
+
+    # Daughter: parent state with offset position and jittered velocity.
+    daughter = Bubble()
+    daughter.position = bubble.position + offset
+    daughter.velocity = wp.vec3(v[0] + jitter[0], v[1] + jitter[1], v[2] + jitter[2])
+    daughter.radius = R_daughter
+    daughter.birth_time = bubble.birth_time
+    daughter.active = 1
+    daughter.site_i = -1
+    daughter.site_j = -1
+    daughter.site_k = -1
+    daughter.site_cleared = 1
+    daughter.departure_radius = bubble.departure_radius
+    bubbles[daughter_slot] = daughter
+
+    # Parent: shrink, mirror-offset, mirror-jitter so the pair is
+    # symmetric about the original centre.
+    bubble.position = bubble.position - offset
+    bubble.velocity = wp.vec3(v[0] - jitter[0], v[1] - jitter[1], v[2] - jitter[2])
+    bubble.radius = R_daughter
+    bubbles[b_idx] = bubble
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 M3: spatial-hash coalescence
+# ---------------------------------------------------------------------------
+
+
+@wp.kernel
+def reset_bin_counts(bin_counts: wp.array(dtype=int)):
+    """Zero the per-step bin-count array. Launched at dim=n_bins."""
+    bin_counts[wp.tid()] = 0
+
+
+@wp.kernel
+def reset_merge_targets(merge_target: wp.array(dtype=int)):
+    """Zero the per-step merge_target array. Launched at dim=max_bubbles."""
+    merge_target[wp.tid()] = 0
+
+
+@wp.func
+def _bin_index_clamped(p: wp.vec3, origin_x: float, origin_y: float,
+                        origin_z: float, bin_size: float,
+                        n_bins_x: int, n_bins_y: int,
+                        n_bins_z: int) -> wp.vec3i:
+    """Compute the 3D bin index for a world-space position, clamped to the
+    valid bin range. Bubbles outside the bin grid get folded onto the
+    nearest face -- safe because such bubbles will be deactivated by
+    update_bubbles' wall check on the next pass."""
+    bx = int((p[0] - origin_x) / bin_size)
+    by = int((p[1] - origin_y) / bin_size)
+    bz = int((p[2] - origin_z) / bin_size)
+    if bx < 0:
+        bx = 0
+    if by < 0:
+        by = 0
+    if bz < 0:
+        bz = 0
+    if bx >= n_bins_x:
+        bx = n_bins_x - 1
+    if by >= n_bins_y:
+        by = n_bins_y - 1
+    if bz >= n_bins_z:
+        bz = n_bins_z - 1
+    return wp.vec3i(bx, by, bz)
+
+
+@wp.kernel
+def bin_bubbles(
+    bubbles: wp.array(dtype=Bubble),
+    bin_counts: wp.array(dtype=int),
+    bin_lists: wp.array2d(dtype=int),
+    origin_x: float,
+    origin_y: float,
+    origin_z: float,
+    bin_size: float,
+    n_bins_x: int,
+    n_bins_y: int,
+    n_bins_z: int,
+    max_per_bin: int,
+):
+    """Pass A: each active bubble atomic-counts itself into its 3D bin and
+    writes its slot index into bin_lists. Bin overflow (> max_per_bin
+    bubbles in one bin) drops the excess silently -- those bubbles miss
+    coalescence detection this step and try again next step."""
+    b_idx = wp.tid()
+    bubble = bubbles[b_idx]
+    if bubble.active == 0:
+        return
+    b3 = _bin_index_clamped(
+        bubble.position, origin_x, origin_y, origin_z, bin_size,
+        n_bins_x, n_bins_y, n_bins_z,
+    )
+    flat = b3[0] + b3[1] * n_bins_x + b3[2] * n_bins_x * n_bins_y
+    k = wp.atomic_add(bin_counts, flat, 1)
+    if k < max_per_bin:
+        bin_lists[flat, k] = b_idx
+
+
+@wp.kernel
+def find_merge_targets(
+    bubbles: wp.array(dtype=Bubble),
+    bin_counts: wp.array(dtype=int),
+    bin_lists: wp.array2d(dtype=int),
+    merge_target: wp.array(dtype=int),
+    origin_x: float,
+    origin_y: float,
+    origin_z: float,
+    bin_size: float,
+    n_bins_x: int,
+    n_bins_y: int,
+    n_bins_z: int,
+    max_per_bin: int,
+):
+    """Pass B: each active bubble checks its own bin and the 26 neighbour
+    bins for overlapping bubbles. Atomic-CAS on merge_target[other_idx]
+    claims the other as an absorbee. First-wins; concurrent attempts on
+    the same target fall through and try the next overlap candidate.
+
+    Each bubble can ABSORB many but be ABSORBED at most once (the CAS on
+    its target slot ensures this). Chain merges A->B->C are deferred:
+    if A claims B and C also wants to claim B, C just doesn't merge B
+    this step. Loose but stable; total mass is never lost."""
+    b_idx = wp.tid()
+    me = bubbles[b_idx]
+    if me.active == 0:
+        return
+    b3 = _bin_index_clamped(
+        me.position, origin_x, origin_y, origin_z, bin_size,
+        n_bins_x, n_bins_y, n_bins_z,
+    )
+    bx0 = b3[0]; by0 = b3[1]; bz0 = b3[2]
+    # Iterate over own bin + 26 neighbours.
+    for di in range(-1, 2):
+        for dj in range(-1, 2):
+            for dk in range(-1, 2):
+                bx = bx0 + di
+                by = by0 + dj
+                bz = bz0 + dk
+                if bx < 0 or by < 0 or bz < 0:
+                    continue
+                if bx >= n_bins_x or by >= n_bins_y or bz >= n_bins_z:
+                    continue
+                flat = bx + by * n_bins_x + bz * n_bins_x * n_bins_y
+                cnt = bin_counts[flat]
+                if cnt > max_per_bin:
+                    cnt = max_per_bin
+                for slot in range(cnt):
+                    other_idx = bin_lists[flat, slot]
+                    # Avoid self, and only attempt one direction of the pair
+                    # (other_idx > b_idx) to halve the work and pair up
+                    # decisively.
+                    if other_idx <= b_idx:
+                        continue
+                    other = bubbles[other_idx]
+                    if other.active == 0:
+                        continue
+                    # Overlap check: ||p_me - p_other|| <= R_me + R_other
+                    dx_p = me.position[0] - other.position[0]
+                    dy_p = me.position[1] - other.position[1]
+                    dz_p = me.position[2] - other.position[2]
+                    dist2 = dx_p * dx_p + dy_p * dy_p + dz_p * dz_p
+                    rsum = me.radius + other.radius
+                    if dist2 > rsum * rsum:
+                        continue
+                    # Try to claim other_idx as an absorbee. CAS: only
+                    # the first claimer wins; record b_idx + 1 (so 0 still
+                    # means "not absorbed").
+                    old = wp.atomic_cas(merge_target, other_idx, 0, b_idx + 1)
+                    if old == 0:
+                        # Won. Continue checking other candidates -- this
+                        # bubble may absorb multiple in one step.
+                        pass
+
+
+@wp.kernel
+def apply_merges_absorber_pass(
+    bubbles: wp.array(dtype=Bubble),
+    merge_target: wp.array(dtype=int),
+    max_bubbles: int,
+):
+    """Pass C1: each non-absorbee bubble scans merge_target for absorbees
+    pointing at it (= b_idx + 1) and folds their volume / momentum into
+    its own state. Reads absorbee structs while they're still active --
+    the absorbee deactivation runs in a separate kernel afterwards to
+    avoid intra-kernel struct read/write races.
+
+    O(N) inner scan per absorber. Most thread work is the absorbee /
+    active == 0 early exit; the few absorbers do the linear scan."""
+    b_idx = wp.tid()
+    me = bubbles[b_idx]
+    if me.active == 0:
+        return
+    if merge_target[b_idx] != 0:
+        return  # I'm an absorbee, handled by absorbee_pass
+
+    target_marker = b_idx + 1
+    V_me = (4.0 / 3.0) * 3.14159265358979 * me.radius * me.radius * me.radius
+    px = me.position[0] * V_me
+    py = me.position[1] * V_me
+    pz = me.position[2] * V_me
+    vx = me.velocity[0] * V_me
+    vy = me.velocity[1] * V_me
+    vz = me.velocity[2] * V_me
+    V_total = V_me
+    earliest_birth = me.birth_time
+    found_any = int(0)
+    for j in range(max_bubbles):
+        if merge_target[j] != target_marker:
+            continue
+        other = bubbles[j]
+        Ro = other.radius
+        Vo = (4.0 / 3.0) * 3.14159265358979 * Ro * Ro * Ro
+        V_total = V_total + Vo
+        px = px + other.position[0] * Vo
+        py = py + other.position[1] * Vo
+        pz = pz + other.position[2] * Vo
+        vx = vx + other.velocity[0] * Vo
+        vy = vy + other.velocity[1] * Vo
+        vz = vz + other.velocity[2] * Vo
+        if other.birth_time < earliest_birth:
+            earliest_birth = other.birth_time
+        found_any = 1
+    if found_any == 0:
+        return
+    # Volume-conserving combine: R_new = (V_total / (4pi/3))^(1/3).
+    R_new = wp.pow(V_total * 3.0 / (4.0 * 3.14159265358979), 1.0 / 3.0)
+    me.radius = R_new
+    inv_V = 1.0 / V_total
+    me.position = wp.vec3(px * inv_V, py * inv_V, pz * inv_V)
+    me.velocity = wp.vec3(vx * inv_V, vy * inv_V, vz * inv_V)
+    me.birth_time = earliest_birth
+    bubbles[b_idx] = me
+
+
+@wp.kernel
+def apply_merges_absorbee_pass(
+    bubbles: wp.array(dtype=Bubble),
+    slot_claim: wp.array(dtype=int),
+    merge_target: wp.array(dtype=int),
+    site_active: wp.array3d(dtype=int),
+):
+    """Pass C2: deactivate all absorbees flagged in merge_target. Runs
+    AFTER the absorber pass so absorbers have already read the absorbees'
+    state. Frees the pool slot and clears any wall site the absorbee
+    was still attached to (rare; usually absorbees are post-departure
+    bubbles in the bulk)."""
+    b_idx = wp.tid()
+    if merge_target[b_idx] == 0:
+        return
+    me = bubbles[b_idx]
+    if me.active == 0:
+        return
+    if me.site_cleared == 0 and me.site_i >= 0:
+        site_active[me.site_i, me.site_j, me.site_k] = 0
+    me.active = 0
+    me.radius = 0.0
+    bubbles[b_idx] = me
+    slot_claim[b_idx] = 0
 
 
 # ---------------------------------------------------------------------------
@@ -1193,8 +1638,6 @@ def step_update_bubbles(
     h_lv = 2.257e6
     sigma = 0.0589
     g_mag = 9.81
-    # Terminal slip velocity for ~2.5 mm water bubbles (Grace 1976 clean bubble).
-    slip = 0.2
 
     # Water line z = base_thickness + fill_fraction * inner_height
     h_inner = cfg.pot.height_m - cfg.pot.base_thickness_m
@@ -1207,6 +1650,7 @@ def step_update_bubbles(
             pool.bubbles,
             pool.slot_claim,
             pool.site_active,
+            pool.needs_fragment,
             grid.T,
             grid.mat,
             grid.ux, grid.uy, grid.uz,
@@ -1218,9 +1662,109 @@ def step_update_bubbles(
             T_sat_k, rho_l, rho_v, cp_l, k_l, h_lv, sigma,
             cfg.boiling.contact_angle_rad,
             g_mag,
-            slip,
             cfg.boiling.initial_bubble_radius_m,
+            cfg.boiling.fragmentation_radius_m,
+            cfg.boiling.max_bubble_radius_m,
             MAT_FLUID,
+        ],
+        device=device,
+    )
+
+
+def step_coalesce_bubbles(
+    pool: BubblePool,
+    cfg: ScenarioConfig,
+    device: str = "cuda:0",
+) -> None:
+    """Phase 8 M3: spatial-hash coalescence.
+
+    Three sub-kernels:
+      1. ``bin_bubbles`` — each active bubble assigns itself to a 3D bin.
+      2. ``find_merge_targets`` — each bubble scans its bin + 26 neighbours
+         for overlap candidates; CAS to claim absorbees.
+      3. ``apply_merges_absorber_pass`` + ``apply_merges_absorbee_pass`` —
+         realize the merges (volume-conserving combine on the absorber,
+         deactivate absorbees).
+
+    Per-step cost: O(N) thanks to the spatial hash. Skipped when
+    ``cfg.boiling.coalescence_enabled`` is False.
+    """
+    if not cfg.boiling.coalescence_enabled:
+        return
+    n_bins = pool.n_bins_x * pool.n_bins_y * pool.n_bins_z
+    max_per_bin = int(cfg.boiling.coalescence_max_per_bin)
+
+    # Reset per-step scratch.
+    wp.launch(reset_bin_counts, dim=n_bins,
+              inputs=[pool.bin_counts], device=device)
+    wp.launch(reset_merge_targets, dim=pool.max_bubbles,
+              inputs=[pool.merge_target], device=device)
+
+    ox, oy, oz = pool.bin_origin
+    bs = pool.bin_size_m
+
+    # Pass A: bin every active bubble.
+    wp.launch(
+        bin_bubbles,
+        dim=pool.max_bubbles,
+        inputs=[
+            pool.bubbles, pool.bin_counts, pool.bin_lists,
+            ox, oy, oz, bs,
+            pool.n_bins_x, pool.n_bins_y, pool.n_bins_z,
+            max_per_bin,
+        ],
+        device=device,
+    )
+    # Pass B: find overlapping pairs and claim absorbees.
+    wp.launch(
+        find_merge_targets,
+        dim=pool.max_bubbles,
+        inputs=[
+            pool.bubbles, pool.bin_counts, pool.bin_lists, pool.merge_target,
+            ox, oy, oz, bs,
+            pool.n_bins_x, pool.n_bins_y, pool.n_bins_z,
+            max_per_bin,
+        ],
+        device=device,
+    )
+    # Pass C1: absorbers fold absorbees in.
+    wp.launch(
+        apply_merges_absorber_pass,
+        dim=pool.max_bubbles,
+        inputs=[pool.bubbles, pool.merge_target, pool.max_bubbles],
+        device=device,
+    )
+    # Pass C2: deactivate absorbees (must run AFTER C1).
+    wp.launch(
+        apply_merges_absorbee_pass,
+        dim=pool.max_bubbles,
+        inputs=[pool.bubbles, pool.slot_claim, pool.merge_target,
+                pool.site_active],
+        device=device,
+    )
+
+
+def step_fragment_bubbles(
+    pool: BubblePool,
+    cfg: ScenarioConfig,
+    device: str = "cuda:0",
+) -> None:
+    """Phase 8 M2: Rayleigh-Taylor binary breakup pass.
+
+    Reads ``pool.needs_fragment`` (set by ``update_bubbles`` when a bubble
+    crossed R_frag this step) and splits each flagged bubble into two
+    equal-volume daughters. Pool-full graceful degradation; flag is reset
+    after each pass so this kernel is idempotent if launched twice.
+    """
+    wp.launch(
+        fragment_bubbles,
+        dim=pool.max_bubbles,
+        inputs=[
+            pool.bubbles,
+            pool.slot_claim,
+            pool.needs_fragment,
+            pool.max_bubbles,
+            cfg.boiling.fragmentation_radius_m,
         ],
         device=device,
     )
@@ -1432,6 +1976,8 @@ def step_bubbles(
     subcooled because the wall kernel diverts all stove heat to vapor.
     """
     step_update_bubbles(grid, pool, cfg, dt, sim_time, device=device)
+    step_fragment_bubbles(pool, cfg, device=device)
+    step_coalesce_bubbles(pool, cfg, device=device)
     step_scatter_latent_heat(grid, pool, cfg, dt, sim_time, device=device)
     step_scatter_momentum(grid, pool, cfg, dt, device=device)
     step_reduce_water_alpha(grid, pool, device=device)

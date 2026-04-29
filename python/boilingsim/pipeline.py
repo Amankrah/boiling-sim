@@ -8,6 +8,8 @@ on a slower cadence.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import pathlib
 import time
 from dataclasses import dataclass
@@ -149,9 +151,84 @@ class Simulation:
         self.t: float = 0.0
         self.step_count: int = 0
 
+        # Per-phase profiling. Opt-in via env var so production runs pay
+        # zero overhead; when enabled, each step phase is wrapped in a
+        # ``wp.synchronize_device`` pair so per-kernel cost is measured
+        # without overlap. The synchronize pairs add ~5–10 % to step
+        # wall time -- documented and consistent across runs.
+        self._profile_enabled: bool = bool(
+            int(os.environ.get("BOILINGSIM_PROFILE", "0") or "0")
+        )
+        self._profile_acc: dict[str, float] = {}
+        self._profile_n: int = 0
+
+        # M2: u_max readback caching for compute_dt. The host sync at
+        # ``ws.u_max_scalar.numpy()[0]`` was 14 % of step time in the M1
+        # profile. Caching for K>1 steps WAS theoretically safe (cfl=0.4
+        # gives 2.5x headroom) but in live dual-solute dashboard runs
+        # transient u_max bursts at bubble departure can violate CFL
+        # under K=8: C_water advection oscillates (negative cells trip
+        # the clamp kernel and inflate precipitated_pct), bubble
+        # positions overshoot outside the pot, and scatter_latent_heat
+        # over-subtracts T to <-200 C. Default K=1 (no caching) is the
+        # safe fallback; opt in via ``BOILINGSIM_DT_REFRESH=N`` only on
+        # workloads with smooth u_max trajectories.
+        self._dt_refresh_every: int = max(
+            1, int(os.environ.get("BOILINGSIM_DT_REFRESH", "1") or "1")
+        )
+        self._cached_u_max: float = 0.0
+        # Force refresh on the first compute_dt call.
+        self._steps_since_dt_refresh: int = self._dt_refresh_every
+
     # ------------------------------------------------------------------
     # Step logic
     # ------------------------------------------------------------------
+
+    @contextlib.contextmanager
+    def _profile_phase(self, name: str):
+        """Context manager that times a step phase when profiling is on.
+
+        When ``BOILINGSIM_PROFILE`` is unset, this is a no-op (single
+        Python ``yield``); the only cost is the ``with`` statement
+        itself, ~0.5 µs per phase per step. When set, it brackets the
+        phase with ``wp.synchronize_device`` so the measured elapsed
+        time captures the actual GPU work, not just kernel-launch
+        overhead.
+        """
+        if not self._profile_enabled:
+            yield
+            return
+        wp.synchronize_device(self.device)
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            wp.synchronize_device(self.device)
+            self._profile_acc[name] = (
+                self._profile_acc.get(name, 0.0)
+                + (time.perf_counter() - t0)
+            )
+
+    def reset_profile(self) -> None:
+        """Clear accumulated phase timings (does not toggle the flag)."""
+        self._profile_acc.clear()
+        self._profile_n = 0
+
+    def profile_summary(self) -> list[tuple[str, float, float, float]]:
+        """Return per-phase timings sorted by total cost (descending).
+
+        Each row is ``(name, total_s, mean_ms_per_step, frac_pct_of_total)``.
+        Empty list when profiling is disabled or no steps have run.
+        """
+        if not self._profile_enabled or self._profile_n == 0:
+            return []
+        total = sum(self._profile_acc.values())
+        rows: list[tuple[str, float, float, float]] = []
+        for name, t in sorted(self._profile_acc.items(), key=lambda kv: -kv[1]):
+            mean_ms = 1000.0 * t / self._profile_n
+            frac_pct = 100.0 * t / total if total > 0 else 0.0
+            rows.append((name, t, mean_ms, frac_pct))
+        return rows
 
     def compute_dt(self) -> float:
         """Return a stable timestep from active stability constraints.
@@ -164,8 +241,18 @@ class Simulation:
         ~6700 s and never binds, but a very fine dx can reach it, at which
         point we clamp here instead of letting ``step_diffuse_nutrient``
         raise.
+
+        u_max is refreshed every ``self._dt_refresh_every`` steps to skip
+        the host-sync readback on most steps (M2). The cached value is
+        used in between; the cfl_safety_factor headroom absorbs the
+        small mismatch.
         """
-        u_max = compute_max_velocity(self.grid, ws=self.ws_fluid)
+        if self._steps_since_dt_refresh >= self._dt_refresh_every:
+            self._cached_u_max = compute_max_velocity(self.grid, ws=self.ws_fluid)
+            self._steps_since_dt_refresh = 1
+        else:
+            self._steps_since_dt_refresh += 1
+        u_max = self._cached_u_max
         dt_cfl = self.grid.dx / max(u_max, 1.0e-8)
         dt_cap = self.cfg.solver.max_dt_s / self.cfg.solver.cfl_safety_factor
         if self.cfg.solver.use_implicit_conduction:
@@ -184,29 +271,34 @@ class Simulation:
     def step(self, dt: float | None = None) -> float:
         """Advance the simulation by one step. Returns the dt used."""
         if dt is None:
-            dt = self.compute_dt()
+            with self._profile_phase("compute_dt"):
+                dt = self.compute_dt()
 
         # 1-2. Semi-Lagrangian advection of velocity and temperature.
-        advect_all(self.grid, self.ws_fluid, dt, device=self.device)
+        with self._profile_phase("advect_all"):
+            advect_all(self.grid, self.ws_fluid, dt, device=self.device)
 
         # 3. Boussinesq buoyancy on z-faces.
-        apply_buoyancy_step(
-            self.grid, self.cfg, dt,
-            beta=self.beta_water, T_ref_k=self.T_ref_k, device=self.device,
-        )
+        with self._profile_phase("buoyancy"):
+            apply_buoyancy_step(
+                self.grid, self.cfg, dt,
+                beta=self.beta_water, T_ref_k=self.T_ref_k, device=self.device,
+            )
 
         # 3b. Phase-3 Milestone B: advance bubbles (growth + departure + rise + vent),
         #     then detect new nucleation. Decoupled from fluid for this milestone —
         #     momentum + latent-heat feedback lands in Milestones C and D.
         if self.cfg.boiling.enabled and self.grid.bubbles is not None:
             from .boiling import step_bubbles
-            step_bubbles(
-                self.grid, self.grid.bubbles, self.cfg, dt,
-                sim_time=self.t, step_count=self.step_count, device=self.device,
-            )
+            with self._profile_phase("step_bubbles"):
+                step_bubbles(
+                    self.grid, self.grid.bubbles, self.cfg, dt,
+                    sim_time=self.t, step_count=self.step_count, device=self.device,
+                )
 
         # 4. Conjugate heat diffusion + all boundary sources (stove, Newton, evap).
-        conduct_one_step(self.grid, self.props, self.ws_thermal, self.cfg, dt, device=self.device)
+        with self._profile_phase("conduct_one_step"):
+            conduct_one_step(self.grid, self.props, self.ws_thermal, self.cfg, dt, device=self.device)
 
         # 4b. Phase-3: Eulerian wall boiling flux (microlayer evaporation).
         #     Directly cools pot-wall cells at nucleation sites, proportional to
@@ -214,10 +306,11 @@ class Simulation:
         #     the Lagrangian scatter alone cannot provide (it acts on mid-fluid).
         if self.cfg.boiling.enabled and self.grid.bubbles is not None:
             from .boiling import step_wall_boiling_flux
-            step_wall_boiling_flux(
-                self.grid, self.grid.bubbles, self.cfg, self.props, dt,
-                device=self.device,
-            )
+            with self._profile_phase("wall_boiling_flux"):
+                step_wall_boiling_flux(
+                    self.grid, self.grid.bubbles, self.cfg, self.props, dt,
+                    device=self.device,
+                )
 
         # 4c. Phase-4 Milestones A+B+C: Arrhenius degradation + in-carrot
         #     diffusion + Sherwood-flux surface leaching into the water-side
@@ -233,26 +326,30 @@ class Simulation:
             )
             from .nutrient import _step_reaction_diffusion_leach
             D_carrot = self.cfg.carrot.diameter_m
-            _step_reaction_diffusion_leach(
-                self.primary_slot, self.grid, D_carrot, dt, device=self.device,
-            )
-            if self.secondary_slot is not None:
+            with self._profile_phase("nutrient_react_diff_leach"):
                 _step_reaction_diffusion_leach(
-                    self.secondary_slot, self.grid, D_carrot, dt, device=self.device,
+                    self.primary_slot, self.grid, D_carrot, dt, device=self.device,
                 )
+                if self.secondary_slot is not None:
+                    _step_reaction_diffusion_leach(
+                        self.secondary_slot, self.grid, D_carrot, dt, device=self.device,
+                    )
 
         # 5. No-slip on solid faces before projection.
-        enforce_no_slip(self.grid, device=self.device)
+        with self._profile_phase("no_slip_pre"):
+            enforce_no_slip(self.grid, device=self.device)
 
         # 6. Pressure projection — enforces ∇·u = 0 in fluid.
-        pressure_projection(
-            self.grid, self.ws_fluid, self.cfg, dt,
-            rho=self.rho_water, device=self.device,
-        )
+        with self._profile_phase("pressure_projection"):
+            pressure_projection(
+                self.grid, self.ws_fluid, self.cfg, dt,
+                rho=self.rho_water, device=self.device,
+            )
 
         # 7. Re-enforce no-slip (pressure subtraction doesn't touch solid faces,
         #    but this guards against drift from numerical error).
-        enforce_no_slip(self.grid, device=self.device)
+        with self._profile_phase("no_slip_post"):
+            enforce_no_slip(self.grid, device=self.device)
 
         # 8. Phase-4 Milestone D: advect the water-side beta-carotene passive
         #    scalar using the freshly projected (divergence-free) velocity
@@ -270,12 +367,15 @@ class Simulation:
                 and self.ws_nutrient is not None
                 and self.primary_slot is not None):
             from .nutrient import _step_advect_clamp
-            _step_advect_clamp(self.primary_slot, self.grid, dt, device=self.device)
-            if self.secondary_slot is not None:
-                _step_advect_clamp(self.secondary_slot, self.grid, dt, device=self.device)
+            with self._profile_phase("nutrient_advect_clamp"):
+                _step_advect_clamp(self.primary_slot, self.grid, dt, device=self.device)
+                if self.secondary_slot is not None:
+                    _step_advect_clamp(self.secondary_slot, self.grid, dt, device=self.device)
 
         self.t += dt
         self.step_count += 1
+        if self._profile_enabled:
+            self._profile_n += 1
         return dt
 
     # ------------------------------------------------------------------
