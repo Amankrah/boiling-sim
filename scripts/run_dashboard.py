@@ -204,8 +204,18 @@ def main() -> int:
     ap.add_argument("--dx-mm", type=float, default=2.0)
     ap.add_argument("--pressure-iters", type=int, default=100)
     ap.add_argument("--max-bubbles", type=int, default=100_000)
-    ap.add_argument("--snapshot-hz", type=float, default=30.0,
-                    help="Target snapshot cadence. 30 is the dashboard default.")
+    ap.add_argument("--snapshot-hz", type=float, default=15.0,
+                    help="Target snapshot cadence (browser frames). 15 Hz "
+                         "is visually smooth (>12 Hz reads as continuous "
+                         "motion) and halves snapshot overhead vs 30 Hz; "
+                         "raise to 30 if you want crisper plot updates.")
+    ap.add_argument("--scalar-hz", type=float, default=2.0,
+                    help="Scalar-history sampling cadence in SIM-TIME hertz. "
+                         "Default 2 means one row per 0.5 sim-second of sim "
+                         "regardless of how slow the dashboard runs. Earlier "
+                         "wall-time-gated sampling produced sub-millisecond "
+                         "rows when the dashboard was slow, blowing past the "
+                         "ScalarHistory cap and decimating early-run samples.")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--ingest-host", default=DEFAULT_INGEST_ADDR[0])
     ap.add_argument("--ingest-port", type=int, default=DEFAULT_INGEST_ADDR[1])
@@ -243,8 +253,16 @@ def main() -> int:
     sim = build_simulation(cfg, device=args.device)
 
     snapshot_interval_s = 1.0 / max(args.snapshot_hz, 0.1)
+    # Scalar-history sampling: gated on SIM-TIME so the row count stays
+    # bounded regardless of how slow the dashboard runs. A negative
+    # sentinel (-1.0e9) forces the first sample to land on step 0.
+    scalar_interval_sim_s = 1.0 / max(args.scalar_hz, 1.0e-3)
+    last_scalar_sample_sim_t: float = -1.0e9
     last_snapshot_at: float = -1.0
     step_count: int = 0
+    # Most recently realised dt -- threaded into ScalarSample so the
+    # dt column reflects actual stability-bound timestep, not 0.0.
+    last_dt: float = 0.0
     # Start paused so the GPU isn't burning cycles on a sim nobody's
     # watching yet. The browser flips us live when the user clicks
     # Resume on the Live page or Apply & Start Run on the Config page
@@ -266,7 +284,7 @@ def main() -> int:
     total_time_s: float = max(args.duration, 0.0)
     history = ScalarHistory(
         target_duration_s=total_time_s if total_time_s > 0 else 600.0,
-        snapshot_hz=args.snapshot_hz,
+        snapshot_hz=args.scalar_hz,
     )
     run_start_wall = time.perf_counter()
     is_complete = False
@@ -275,7 +293,8 @@ def main() -> int:
     print("=== Phase 6 live dashboard producer ===")
     print(f"  config       : {args.config}")
     print(f"  dx           : {args.dx_mm:.2f} mm")
-    print(f"  snapshot Hz  : {args.snapshot_hz:.1f}")
+    print(f"  snapshot Hz  : {args.snapshot_hz:.1f} (browser frames)")
+    print(f"  scalar Hz    : {args.scalar_hz:.1f} (sim-time, CSV/HDF5 rows)")
     print(f"  artefacts dir: {artefacts_dir}")
     print(f"  total_time_s : {total_time_s} (0 = run forever)")
     print(f"  ingest  -> tcp://{args.ingest_host}:{args.ingest_port}")
@@ -290,7 +309,7 @@ def main() -> int:
             uuid.uuid4().hex,
             ScalarHistory(
                 target_duration_s=total_time_s if total_time_s > 0 else 600.0,
-                snapshot_hz=args.snapshot_hz,
+                snapshot_hz=args.scalar_hz,
             ),
             time.perf_counter(),
             False,
@@ -407,6 +426,8 @@ def main() -> int:
                 sim = build_simulation(cfg, device=args.device)
                 step_count = 0
                 last_snapshot_at = -1.0
+                last_scalar_sample_sim_t = -1.0e9
+                last_dt = 0.0
                 run_id, history, run_start_wall, is_complete = reset_run(sim)
                 # If start_run arrived alongside set_config, the
                 # duration update already landed in step 2; reset_run
@@ -449,19 +470,34 @@ def main() -> int:
 
             # 4. Step (skip if paused or complete, but keep the snapshot
             #    cadence so the browser stays responsive).
+            tick_sample = None  # ScalarSample, computed at most once per loop
             if not paused and not is_complete:
-                sim.step()
+                last_dt = sim.step()
                 step_count += 1
-                # Buffer scalars at the snapshot cadence (not step
-                # cadence) to match HDF5 density expectations.
-                now = time.perf_counter()
-                if now - last_snapshot_at >= snapshot_interval_s:
-                    sample = sim.sample_scalars(dt_last=0.0)
-                    history.append(sample)
+                # Sample scalars on a SIM-TIME cadence (default 2 Hz of
+                # sim-time, i.e. one row per 0.5 sim-second). Wall-time
+                # gating produced sub-millisecond rows when the dashboard
+                # ran slowly, blowing past the ScalarHistory cap and
+                # decimating the early run.
+                if sim.t - last_scalar_sample_sim_t >= scalar_interval_sim_s:
+                    tick_sample = sim.sample_scalars(dt_last=last_dt)
+                    history.append(tick_sample)
+                    last_scalar_sample_sim_t = sim.t
 
             # 5. Emit snapshot on the chosen cadence.
             now = time.perf_counter()
             if now - last_snapshot_at >= snapshot_interval_s:
+                # Reuse the sample we just appended to history if the
+                # scalar gate fired this tick; otherwise sample fresh
+                # for the snapshot. Either way, sample_scalars runs at
+                # most once per loop -- previously it ran twice per
+                # snapshot tick (once for history, once inside
+                # build_snapshot), each with 5-10 GPU readbacks.
+                snapshot_sample = (
+                    tick_sample
+                    if tick_sample is not None
+                    else sim.sample_scalars(dt_last=last_dt)
+                )
                 producer.send_snapshot(
                     sim, step=step_count,
                     is_rebuilding=False,
@@ -470,6 +506,7 @@ def main() -> int:
                     total_time_s=total_time_s,
                     is_complete=is_complete,
                     last_error=last_error,
+                    sample=snapshot_sample,
                 )
                 last_snapshot_at = now
 

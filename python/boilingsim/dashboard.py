@@ -142,6 +142,7 @@ def build_snapshot(
     total_time_s: float = 0.0,
     is_complete: bool = False,
     last_error: str = "",
+    sample: Any = None,
 ) -> dict[str, Any]:
     """Build the Python dict that ``msgpack.packb`` serializes into a
     ``Snapshot``-compatible wire buffer.
@@ -158,6 +159,12 @@ def build_snapshot(
     ``pot_wall_thickness_m``, ``pot_base_thickness_m`` -- pot geometry
     echoed from ``cfg.pot`` so the 3D renderer can scale to match the
     currently-simulated pot instead of hardcoding 20 cm x 12 cm.
+
+    Perf: callers can pass a pre-computed ``sample`` (a ``ScalarSample``)
+    to skip the 5-10 GPU readbacks ``sample_scalars`` performs --
+    important when the dashboard loop already sampled this tick for the
+    scalar history. Pass ``None`` (default) to recompute internally,
+    which keeps tests and ad-hoc callers working.
     """
     grid = sim.grid
     cfg = sim.cfg
@@ -177,10 +184,11 @@ def build_snapshot(
     alpha_ds = _downsample_halves(alpha).ravel(order="C")
     nx_ds, ny_ds, nz_ds = (nx // 2, ny // 2, nz // 2)
 
-    # Mass-partition retention percentages via sample_scalars (cheap -- the
-    # same diagnostic the HDF5 writer already runs). Use dt_last=0 since
-    # this is a snapshot, not an integration step.
-    sample = sim.sample_scalars(dt_last=0.0)
+    # Mass-partition retention percentages via sample_scalars. Reuse a
+    # pre-computed sample when the caller has one (~5-10 ms of GPU
+    # readbacks saved per snapshot tick).
+    if sample is None:
+        sample = sim.sample_scalars(dt_last=0.0)
 
     wall_heat_flux = float(getattr(cfg.heating, "base_heat_flux_w_per_m2", 0.0))
 
@@ -242,6 +250,7 @@ def serialize_snapshot(
     total_time_s: float = 0.0,
     is_complete: bool = False,
     last_error: str = "",
+    sample: Any = None,
 ) -> bytes:
     """Msgpack-encode a snapshot for transmission to the Rust ws-server.
 
@@ -259,6 +268,7 @@ def serialize_snapshot(
             total_time_s=total_time_s,
             is_complete=is_complete,
             last_error=last_error,
+            sample=sample,
         ),
         use_bin_type=True,
         # Floats are default 64-bit in msgpack; we want 32-bit to match
@@ -361,6 +371,7 @@ class SnapshotProducer:
         total_time_s: float = 0.0,
         is_complete: bool = False,
         last_error: str = "",
+        sample: Any = None,
     ) -> bool:
         buf = serialize_snapshot(
             sim, step,
@@ -370,6 +381,7 @@ class SnapshotProducer:
             total_time_s=total_time_s,
             is_complete=is_complete,
             last_error=last_error,
+            sample=sample,
         )
         return self.send_bytes(buf)
 
