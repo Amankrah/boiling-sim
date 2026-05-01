@@ -256,6 +256,12 @@ class BubblePool:
     n_bins_z: int
     bin_size_m: float
     bin_origin: tuple                 # (ox, oy, oz) world-space origin of the bin grid
+    # Phase 8 Refactor-1: compact-readback workspace (read_active_bubbles).
+    view_positions: wp.array          # (max_bubbles, 3) float32, dense scatter target
+    view_radii: wp.array              # (max_bubbles,) float32
+    view_departure_radii: wp.array    # (max_bubbles,) float32
+    view_site_cleared: wp.array       # (max_bubbles,) int32
+    view_n_active: wp.array           # (1,) int32, atomic counter zeroed each readback
     max_bubbles: int
     cfg: BoilingConfig
 
@@ -311,6 +317,16 @@ def allocate_bubble_pool(cfg: ScenarioConfig, grid: Grid,
         float(grid.origin[2]),
     )
 
+    # Phase 8 Refactor-1: compact-readback workspace. Sized once to the
+    # full pool so the host transfer is over a small typed buffer rather
+    # than the 60-byte/slot Bubble struct, and downstream Python uses
+    # ``[:n_active]`` instead of a boolean mask.
+    view_positions = wp.zeros((boiling.max_bubbles, 3), dtype=float, device=device)
+    view_radii = wp.zeros(boiling.max_bubbles, dtype=float, device=device)
+    view_departure_radii = wp.zeros(boiling.max_bubbles, dtype=float, device=device)
+    view_site_cleared = wp.zeros(boiling.max_bubbles, dtype=int, device=device)
+    view_n_active = wp.zeros(1, dtype=int, device=device)
+
     return BubblePool(
         bubbles=bubbles,
         slot_claim=slot_claim,
@@ -325,6 +341,11 @@ def allocate_bubble_pool(cfg: ScenarioConfig, grid: Grid,
         n_bins_z=n_bins_z,
         bin_size_m=bin_size,
         bin_origin=bin_origin,
+        view_positions=view_positions,
+        view_radii=view_radii,
+        view_departure_radii=view_departure_radii,
+        view_site_cleared=view_site_cleared,
+        view_n_active=view_n_active,
         max_bubbles=boiling.max_bubbles,
         cfg=boiling,
     )
@@ -341,6 +362,105 @@ def _count_active_kernel(bubbles: wp.array(dtype=Bubble),
     b = wp.tid()
     if bubbles[b].active == 1:
         wp.atomic_add(sum_buf, 0, 1)
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 Refactor-1: compact bubble readback for dashboard / sample_scalars
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CompactBubbles:
+    """Dense host-side view over the active bubbles.
+
+    Emitted by :func:`read_active_bubbles`. ``positions`` is shaped
+    ``(n_active, 3)``; the three radius/flag arrays are length
+    ``n_active``. Output order is non-deterministic (the GPU compaction
+    uses ``atomic_add`` to claim slots), so callers must not assume
+    stability across runs.
+    """
+    n_active: int
+    positions: np.ndarray
+    radii: np.ndarray
+    departure_radii: np.ndarray
+    site_cleared: np.ndarray  # bool
+
+
+_EMPTY_VEC3 = np.zeros((0, 3), dtype=np.float32)
+_EMPTY_F32 = np.zeros(0, dtype=np.float32)
+_EMPTY_BOOL = np.zeros(0, dtype=bool)
+
+
+@wp.kernel
+def _compact_active_bubbles_kernel(
+    bubbles: wp.array(dtype=Bubble),
+    view_positions: wp.array2d(dtype=float),
+    view_radii: wp.array(dtype=float),
+    view_departure_radii: wp.array(dtype=float),
+    view_site_cleared: wp.array(dtype=int),
+    view_n_active: wp.array(dtype=int),
+):
+    """Scatter active bubbles into dense view_* arrays + atomic count.
+
+    One thread per pool slot. Inactive slots return early; active slots
+    claim a unique output index via ``atomic_add`` and write the
+    dashboard-relevant fields. Output ordering is race-dependent and
+    therefore non-deterministic -- safe because every consumer
+    (mean/max statistics, msgpack list, HDF5 unordered set) is
+    order-independent.
+    """
+    b = wp.tid()
+    if bubbles[b].active != 1:
+        return
+    idx = wp.atomic_add(view_n_active, 0, 1)
+    view_positions[idx, 0] = bubbles[b].position[0]
+    view_positions[idx, 1] = bubbles[b].position[1]
+    view_positions[idx, 2] = bubbles[b].position[2]
+    view_radii[idx] = bubbles[b].radius
+    view_departure_radii[idx] = bubbles[b].departure_radius
+    view_site_cleared[idx] = bubbles[b].site_cleared
+
+
+def read_active_bubbles(pool: "BubblePool") -> CompactBubbles:
+    """Return a dense host-side view of the currently active bubbles.
+
+    Replaces the older idiom of ``pool.bubbles.numpy(); mask =
+    bubbles['active'] == 1; ...`` which DMAs the full 60-byte/slot
+    struct array even when only a few percent of the pool is active.
+    The kernel scatters into pre-allocated workspace arrays, then we
+    sync once on the n_active counter and slice ``[:n_active]`` on the
+    host.
+    """
+    pool.view_n_active.zero_()
+    wp.launch(
+        _compact_active_bubbles_kernel,
+        dim=pool.max_bubbles,
+        inputs=[
+            pool.bubbles,
+            pool.view_positions,
+            pool.view_radii,
+            pool.view_departure_radii,
+            pool.view_site_cleared,
+            pool.view_n_active,
+        ],
+        device=pool.bubbles.device,
+    )
+    n_active = int(pool.view_n_active.numpy()[0])
+    if n_active == 0:
+        return CompactBubbles(
+            n_active=0,
+            positions=_EMPTY_VEC3,
+            radii=_EMPTY_F32,
+            departure_radii=_EMPTY_F32,
+            site_cleared=_EMPTY_BOOL,
+        )
+    return CompactBubbles(
+        n_active=n_active,
+        positions=pool.view_positions.numpy()[:n_active],
+        radii=pool.view_radii.numpy()[:n_active],
+        departure_radii=pool.view_departure_radii.numpy()[:n_active],
+        site_cleared=pool.view_site_cleared.numpy()[:n_active].astype(bool),
+    )
 
 
 @wp.kernel

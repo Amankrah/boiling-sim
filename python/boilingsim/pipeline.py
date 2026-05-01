@@ -396,25 +396,26 @@ class Simulation:
             T_inner_max_c = float(T_wall.max() - 273.15)
         u_max = compute_max_velocity(self.grid, ws=self.ws_fluid)
 
-        # Phase-3 bubble diagnostics — cheap host roundtrip over the bubble pool.
+        # Phase-3 bubble diagnostics. Phase-8-Refactor-1: compact readback
+        # via :func:`read_active_bubbles` -- DMAs ~24 bytes/slot of typed
+        # float arrays instead of the 60-byte/slot Bubble struct, and
+        # avoids the host-side boolean mask over ``max_bubbles``.
         n_active = 0
         mean_R_mm = 0.0
         mean_departed_R_mm = 0.0
         max_R_mm = 0.0
         alpha_min = 1.0
         if self.grid.bubbles is not None:
-            bubbles = self.grid.bubbles.bubbles.numpy()
-            active_mask = bubbles["active"] == 1
-            n_active = int(active_mask.sum())
+            from .boiling import read_active_bubbles
+            view = read_active_bubbles(self.grid.bubbles)
+            n_active = view.n_active
             if n_active > 0:
-                R = bubbles["radius"][active_mask]
-                mean_R_mm = float(R.mean() * 1000.0)
-                max_R_mm = float(R.max() * 1000.0)
-                detached_mask = bubbles["site_cleared"][active_mask] == 1
-                if detached_mask.any():
+                mean_R_mm = float(view.radii.mean() * 1000.0)
+                max_R_mm = float(view.radii.max() * 1000.0)
+                if view.site_cleared.any():
                     # Use the frozen departure_radius so this reports the
                     # Fritz-departure population mean, not post-departure growth.
-                    R_dep = bubbles["departure_radius"][active_mask][detached_mask]
+                    R_dep = view.departure_radii[view.site_cleared]
                     mean_departed_R_mm = float(R_dep.mean() * 1000.0)
             if self.grid.water_alpha_base is not None:
                 alpha_min = float(self.grid.water_alpha.numpy()[self._water_mask].min())
@@ -549,18 +550,21 @@ class Simulation:
                 snapshots_T.append(self.grid.T.numpy().astype(np.float32))
                 snapshot_times.append(self.t)
                 if self.grid.bubbles is not None:
-                    bs = self.grid.bubbles.bubbles.numpy()
+                    from .boiling import read_active_bubbles
+                    view = read_active_bubbles(self.grid.bubbles)
                     # Departure-diameter histogram: restrict to bubbles that
                     # have actually detached from a wall site and use the
                     # frozen ``departure_radius`` rather than the live
                     # ``radius`` (which keeps growing during rise). This
                     # eliminates the near-zero spike caused by counting
                     # in-flight infant bubbles as if they were departures.
-                    mask = (bs["active"] == 1) & (bs["site_cleared"] == 1)
+                    detached = view.site_cleared
                     bubble_radii_snaps.append(
-                        bs["departure_radius"][mask].astype(np.float32)
+                        view.departure_radii[detached].astype(np.float32)
                     )
-                    bubble_positions_snaps.append(bs["position"][mask].astype(np.float32))
+                    bubble_positions_snaps.append(
+                        view.positions[detached].astype(np.float32)
+                    )
                 last_snapshot_t = self.t
 
             if self.t - last_progress >= progress_every_s and scalars:
@@ -592,10 +596,11 @@ class Simulation:
         snapshots_T.append(self.grid.T.numpy().astype(np.float32))
         snapshot_times.append(self.t)
         if self.grid.bubbles is not None:
-            bs = self.grid.bubbles.bubbles.numpy()
-            mask = (bs["active"] == 1) & (bs["site_cleared"] == 1)
-            bubble_radii_snaps.append(bs["departure_radius"][mask].astype(np.float32))
-            bubble_positions_snaps.append(bs["position"][mask].astype(np.float32))
+            from .boiling import read_active_bubbles
+            view = read_active_bubbles(self.grid.bubbles)
+            detached = view.site_cleared
+            bubble_radii_snaps.append(view.departure_radii[detached].astype(np.float32))
+            bubble_positions_snaps.append(view.positions[detached].astype(np.float32))
 
         if out_path is not None:
             out_path = pathlib.Path(out_path)

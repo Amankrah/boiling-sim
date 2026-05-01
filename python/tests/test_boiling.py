@@ -1031,3 +1031,83 @@ def test_coalescence_disabled_is_noop():
     bubbles = pool.bubbles.numpy()
     n_active = int((bubbles["active"] == 1).sum())
     assert n_active == 2, f"coalescence ran with disabled flag: {n_active} active"
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 Refactor-1: compact bubble readback
+# ---------------------------------------------------------------------------
+
+
+def test_compact_active_bubbles_empty_pool():
+    """Fresh pool with no bubbles seeded must return n_active=0 and empty
+    arrays without crashing in the short-circuit branch."""
+    from boilingsim.boiling import read_active_bubbles
+
+    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg.boiling.enabled = True
+    cfg.boiling.max_bubbles = 64
+    cfg.grid.dx_m = 0.002
+    grid = build_pot_geometry(cfg)
+    pool = grid.bubbles
+
+    view = read_active_bubbles(pool)
+
+    assert view.n_active == 0
+    assert view.positions.shape == (0, 3)
+    assert view.radii.shape == (0,)
+    assert view.departure_radii.shape == (0,)
+    assert view.site_cleared.shape == (0,)
+    assert view.site_cleared.dtype == np.bool_
+
+
+def test_compact_active_bubbles_sparse_mixed():
+    """Seed five active bubbles into sparse slots (0, 17, 53, 99, 4321)
+    with distinct radii, then assert the helper returns exactly those
+    five with all fields preserved. Output order is non-deterministic
+    (atomic_add race) so we compare as sets / sorted arrays."""
+    from boilingsim.boiling import read_active_bubbles, seed_test_bubble
+
+    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg.boiling.enabled = True
+    cfg.boiling.max_bubbles = 8192
+    cfg.grid.dx_m = 0.002
+    grid = build_pot_geometry(cfg)
+    pool = grid.bubbles
+
+    seeded = [
+        # (slot, position, radius)
+        (0,    (0.000, 0.000, 0.050), 1.0e-3),
+        (17,   (0.010, 0.000, 0.052), 1.5e-3),
+        (53,   (0.020, 0.005, 0.054), 2.0e-3),
+        (99,   (0.030, 0.010, 0.056), 2.5e-3),
+        (4321, (0.040, 0.015, 0.058), 3.0e-3),
+    ]
+    for slot, pos, R in seeded:
+        seed_test_bubble(pool, slot=slot, position=pos,
+                         velocity=(0.0, 0.0, 0.0),
+                         radius=R, birth_time=0.0)
+
+    view = read_active_bubbles(pool)
+
+    assert view.n_active == 5
+    assert view.positions.shape == (5, 3)
+    assert view.radii.shape == (5,)
+
+    # Sorted-radius comparison (output order is race-dependent).
+    sorted_radii = np.sort(view.radii)
+    expected_radii = np.array(sorted([s[2] for s in seeded]), dtype=np.float32)
+    np.testing.assert_allclose(sorted_radii, expected_radii, rtol=1e-6)
+
+    # Position set match: sort each row by x to align
+    sorted_pos = view.positions[np.argsort(view.positions[:, 0])]
+    expected_pos = np.array(
+        sorted([s[1] for s in seeded], key=lambda p: p[0]),
+        dtype=np.float32,
+    )
+    np.testing.assert_allclose(sorted_pos, expected_pos, rtol=1e-6)
+
+    # seed_test_bubble sets site_cleared=1 and departure_radius=radius;
+    # verify the kernel propagated both fields.
+    assert view.site_cleared.all()
+    sorted_dep = np.sort(view.departure_radii)
+    np.testing.assert_allclose(sorted_dep, expected_radii, rtol=1e-6)

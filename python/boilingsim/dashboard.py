@@ -115,15 +115,13 @@ def _active_bubbles(sim: "Simulation") -> list[dict[str, Any]]:
     """
     if sim.grid.bubbles is None:
         return []
-    bubbles = sim.grid.bubbles.bubbles.numpy()
-    active_mask = bubbles["active"] == 1
-    if not active_mask.any():
+    from .boiling import read_active_bubbles  # local import: avoids cycle
+    view = read_active_bubbles(sim.grid.bubbles)
+    if view.n_active == 0:
         return []
-    pos = bubbles["position"][active_mask].astype(np.float32)
-    radii = bubbles["radius"][active_mask].astype(np.float32)
     return [
         {"position": [float(p[0]), float(p[1]), float(p[2])], "radius": float(r)}
-        for p, r in zip(pos, radii, strict=True)
+        for p, r in zip(view.positions, view.radii, strict=True)
     ]
 
 
