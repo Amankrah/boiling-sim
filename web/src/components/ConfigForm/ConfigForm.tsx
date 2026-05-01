@@ -232,7 +232,31 @@ export function ConfigForm({ snapshot, sendCommand, onApplied }: Props) {
       </Section>
 
       {/* --- Carrot --- */}
-      <Section title="Carrot" subtitle="geometry + position">
+      <Section title="Carrot" subtitle="geometry + count + orientation">
+        <FieldRow label="Count">
+          <NumberInput
+            label="N"
+            ariaLabel="number of carrot instances"
+            value={draft.carrot.count}
+            min={1}
+            max={64}
+            step={1}
+            unit=""
+            onCommit={(n) => updateCarrot({ count: Math.round(n) })}
+          />
+        </FieldRow>
+        <FieldRow label="Axis">
+          <Select
+            ariaLabel="carrot cylinder axis"
+            value={draft.carrot.axis}
+            options={[
+              { value: "x", label: "x (horizontal)" },
+              { value: "y", label: "y (horizontal)" },
+              { value: "z", label: "z (vertical, legacy)" },
+            ]}
+            onChange={(axis) => updateCarrot({ axis })}
+          />
+        </FieldRow>
         <FieldRow label="Diameter">
           <NumberInput
             label="∅"
@@ -272,6 +296,21 @@ export function ConfigForm({ snapshot, sendCommand, onApplied }: Props) {
               })
             }
           />
+        </FieldRow>
+        <FieldRow label="Total mass">
+          {/* Derived (count · π · (d/2)² · L · ρ_carrot, ρ ≈ 1040 kg/m³).
+              Displayed live so users know "I'm cooking N grams". */}
+          <span className="text-secondary" aria-live="polite">
+            {(
+              draft.carrot.count *
+              Math.PI *
+              Math.pow(draft.carrot.diameter_m / 2, 2) *
+              draft.carrot.length_m *
+              1040 *
+              1000
+            ).toFixed(1)}{" "}
+            g
+          </span>
         </FieldRow>
       </Section>
 

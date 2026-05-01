@@ -9,11 +9,18 @@ Kelvin internally downstream).
 
 from __future__ import annotations
 
+import math
 import pathlib
 from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+# Carrot tissue density in kg/m^3 (close to water; varieties range
+# 1010-1080). Used to derive total_mass_g from geometry for the Config
+# UI's quantity feedback.
+RHO_CARROT_KG_PER_M3 = 1040.0
 
 
 MaterialName = Literal["steel_304", "cast_iron", "aluminum", "copper"]
@@ -43,8 +50,30 @@ class WaterConfig(BaseModel):
 class CarrotConfig(BaseModel):
     diameter_m: float = Field(0.025, gt=0.0)
     length_m: float = Field(0.05, gt=0.0)
+    # Anchor point. Semantics depend on ``axis``:
+    #   axis="z" (legacy): bottom of the carrot; cylinder extends +z by length_m.
+    #   axis="x" or "y":   centre of the carrot; cylinder extends ±length_m/2.
     position: tuple[float, float, float] = (0.0, 0.0, 0.03)
+    # Number of identical carrots to place in the pot. count=1 keeps the
+    # legacy single-carrot behaviour (used by every existing benchmark
+    # scenario). count>1 triggers deterministic auto-placement around
+    # ``position`` (see ``auto_place_carrots``).
+    count: int = Field(1, ge=1, le=64)
+    # Cylinder axis. "z" is legacy (vertical carrot, standing on its end).
+    # "x" or "y" gives the realistic horizontal stew orientation.
+    axis: Literal["x", "y", "z"] = "z"
     initial_beta_carotene_mg_per_100g: float = Field(8.3, ge=0.0)
+
+    def total_mass_g(self) -> float:
+        """Aggregate carrot mass in grams.
+
+        Used by the dashboard for quantity feedback: when the user adjusts
+        count/diameter/length on the Config page, the UI shows the
+        derived total in real time so they know "I'm cooking 200 g".
+        """
+        r = self.diameter_m / 2.0
+        volume_m3 = self.count * math.pi * r * r * self.length_m
+        return volume_m3 * RHO_CARROT_KG_PER_M3 * 1000.0  # kg -> g
 
 
 class HeatingConfig(BaseModel):
@@ -331,16 +360,141 @@ class ScenarioConfig(BaseModel):
     def _carrot_fits_inside_pot(self) -> "ScenarioConfig":
         inner_radius = self.pot.diameter_m / 2 - self.pot.wall_thickness_m
         water_height = self.water.fill_fraction * (self.pot.height_m - self.pot.base_thickness_m)
-
-        cx, cy, cz = self.carrot.position
+        water_top_z = self.pot.base_thickness_m + water_height
         carrot_r = self.carrot.diameter_m / 2
-        if (cx ** 2 + cy ** 2) ** 0.5 + carrot_r > inner_radius:
-            raise ValueError("carrot center + radius exceeds pot inner radius")
-        if cz < self.pot.base_thickness_m:
-            raise ValueError("carrot sits below the pot base")
-        if cz + self.carrot.length_m > self.pot.base_thickness_m + water_height:
-            raise ValueError("carrot top extends above the water line")
+        carrot_L = self.carrot.length_m
+        axis = self.carrot.axis
+
+        centres = auto_place_carrots(
+            count=self.carrot.count,
+            axis=axis,
+            anchor=self.carrot.position,
+            diameter_m=self.carrot.diameter_m,
+            length_m=carrot_L,
+            inner_radius=inner_radius,
+            base_thickness=self.pot.base_thickness_m,
+            water_top_z=water_top_z,
+        )
+
+        for idx, (cx, cy, cz) in enumerate(centres):
+            tag = f"carrot[{idx}]" if self.carrot.count > 1 else "carrot"
+            if axis == "z":
+                # Legacy vertical: ``position`` is the base; cylinder fills [cz, cz+L].
+                if (cx ** 2 + cy ** 2) ** 0.5 + carrot_r > inner_radius:
+                    raise ValueError(f"{tag} center + radius exceeds pot inner radius")
+                if cz < self.pot.base_thickness_m:
+                    raise ValueError(f"{tag} sits below the pot base")
+                if cz + carrot_L > water_top_z:
+                    raise ValueError(f"{tag} top extends above the water line")
+            else:
+                # Horizontal: ``position`` is the centre; cylinder fills the
+                # axial range and the perpendicular plane up to carrot_r.
+                # The bounding-box test below over-estimates the swept area
+                # (corner of the bbox vs cylinder cap) but is correct for
+                # the inscribed-cylinder check we want here.
+                axial = 0 if axis == "x" else 1
+                # Perpendicular pair: the two axes that aren't the cylinder axis.
+                p_axes = [i for i in (0, 1, 2) if i != axial]
+                p = (cx, cy, cz)
+                # The cylinder's perpendicular bounds (from the centre) are
+                # (carrot_r) along each of the perpendicular axes.
+                # In-pot bound: the cylinder must lie inside the inner pot
+                # cylinder (radial in x,y) AND between base and water top in z.
+                # Worst-case radial extent of the cylinder ends, projected
+                # into the (x,y) plane: at the cap, points lie on a disk of
+                # radius carrot_r centred at (axial-end, ...). For axis=x,
+                # the (x,y) projection of the cylinder is a rectangle of
+                # half-width L/2 along x and half-width carrot_r along y;
+                # the worst-case radial distance from the pot axis is at
+                # the corner of that rectangle.
+                if axis == "x":
+                    far_x = abs(cx) + carrot_L / 2.0
+                    far_y = abs(cy) + carrot_r
+                    if (far_x ** 2 + far_y ** 2) ** 0.5 > inner_radius:
+                        raise ValueError(
+                            f"{tag} (axis=x) sweeps outside pot inner radius"
+                        )
+                    if cz - carrot_r < self.pot.base_thickness_m:
+                        raise ValueError(f"{tag} bottom sits below the pot base")
+                    if cz + carrot_r > water_top_z:
+                        raise ValueError(f"{tag} top extends above the water line")
+                elif axis == "y":
+                    far_x = abs(cx) + carrot_r
+                    far_y = abs(cy) + carrot_L / 2.0
+                    if (far_x ** 2 + far_y ** 2) ** 0.5 > inner_radius:
+                        raise ValueError(
+                            f"{tag} (axis=y) sweeps outside pot inner radius"
+                        )
+                    if cz - carrot_r < self.pot.base_thickness_m:
+                        raise ValueError(f"{tag} bottom sits below the pot base")
+                    if cz + carrot_r > water_top_z:
+                        raise ValueError(f"{tag} top extends above the water line")
+                _ = p_axes  # silence unused if branches above already returned
         return self
+
+
+def auto_place_carrots(
+    count: int,
+    axis: Literal["x", "y", "z"],
+    anchor: tuple[float, float, float],
+    diameter_m: float,
+    length_m: float,
+    inner_radius: float,
+    base_thickness: float,
+    water_top_z: float,
+) -> list[tuple[float, float, float]]:
+    """Compute deterministic centres for ``count`` identical carrots.
+
+    ``anchor`` is the user-supplied ``cfg.carrot.position``: the base
+    point for axis="z" (legacy single-carrot semantics) or the centroid
+    of the placement region for axis="x" / "y".
+
+    Strategy:
+      * count==1: return [anchor] unchanged. Preserves every existing
+        single-carrot scenario without needing YAML edits.
+      * axis=="z" (vertical): distribute centres on a circumferential
+        ring around (anchor.x, anchor.y) at z=anchor.z, sized to fit
+        inside the pot.
+      * axis in {"x", "y"} (horizontal): stack centres along the
+        perpendicular horizontal axis at z=anchor.z, with 1.2x carrot
+        diameter spacing between centres so the cylinders don't
+        intersect.
+
+    Raises ``ValueError`` when count is too large to fit.
+    """
+    if count <= 1:
+        return [anchor]
+    cx0, cy0, cz0 = anchor
+    r = diameter_m / 2.0
+    if axis == "z":
+        # Ring placement around the anchor.
+        ring_r = inner_radius - r * 1.5
+        if ring_r < r:
+            raise ValueError(
+                f"pot too narrow for {count} vertical carrots "
+                f"(need ring radius > {r:.3f} m, have {ring_r:.3f} m)"
+            )
+        return [
+            (
+                cx0 + ring_r * math.cos(2.0 * math.pi * i / count),
+                cy0 + ring_r * math.sin(2.0 * math.pi * i / count),
+                cz0,
+            )
+            for i in range(count)
+        ]
+    # Horizontal: stack along the perpendicular horizontal axis.
+    # spacing = 1.2 * diameter between centres (20% gap).
+    spacing = 1.2 * diameter_m
+    half_span = (count - 1) * spacing / 2.0
+    centres: list[tuple[float, float, float]] = []
+    for i in range(count):
+        offset = i * spacing - half_span
+        if axis == "x":
+            cx, cy = cx0, cy0 + offset
+        else:  # axis == "y"
+            cx, cy = cx0 + offset, cy0
+        centres.append((cx, cy, cz0))
+    return centres
 
 
 def load_scenario(path: str | pathlib.Path) -> ScenarioConfig:

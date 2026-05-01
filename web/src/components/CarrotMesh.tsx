@@ -1,15 +1,12 @@
-// Dev-guide §6.4 calls for a GLB-loaded carrot mesh with per-vertex
-// colour from `carrot_surface_c`. For M5 we use a procedural capped
-// cylinder positioned at the scenario's carrot centre and coloured by
-// the scalar `carrot_retention` / `carrot_retention2`. Per-vertex
-// shading lands alongside a real GLB asset in a later pass -- the
-// wire format already carries the vectors (`carrot_surface_c*`),
-// they're just empty in M1-M3.
+// Procedural-cylinder carrot renderer. v6: reads pose + count + axis
+// from the snapshot (Python's auto-placement output), so configurations
+// with N carrots laying flat (axis=0/1) render N cylinders correctly.
 //
 // Colour mapping: high retention → vivid orange (fresh carrot),
 // low retention → muted brown (cooked-through). When both solutes
-// are active we average them; this shows degradation regardless of
-// which mechanism dominates.
+// are active we average them. Per-instance retention is a future
+// extension (needs labelled cells); for now all instances share the
+// aggregate scalar.
 
 import { useMemo } from "react";
 import * as THREE from "three";
@@ -18,23 +15,10 @@ import type { Snapshot } from "../types/snapshot";
 
 interface Props {
   snapshot: Snapshot;
-  /**
-   * Carrot geometry lives in the YAML scenario config (carrot.diameter_m,
-   * carrot.length_m, carrot.position). The snapshot wire format does not
-   * carry those yet, so we default-guess matching the Phase-4 scenarios
-   * (25 mm diameter, 50 mm length, centred above the pot base). Callers
-   * can override.
-   */
-  diameterM?: number;
-  lengthM?: number;
-  /** World-space centre of the carrot's axis midpoint. */
-  centre?: [number, number, number];
 }
 
 /** Three-stop gradient aligned to the `--accent-warm` token:
- *  fresh (vivid amber) → cooked (muted amber) → charred (dark brown).
- *  Applied as the cylinder's meshStandardMaterial color; PBR lighting
- *  from the env map + key light does the rest. */
+ *  fresh (vivid amber) → cooked (muted amber) → charred (dark brown). */
 function retentionToColor(retentionPct: number): THREE.Color {
   const t = Math.max(0, Math.min(1, retentionPct / 100));
   const fresh = new THREE.Color("#f5a524"); // --accent-warm
@@ -46,16 +30,38 @@ function retentionToColor(retentionPct: number): THREE.Color {
   return charred.lerp(cooked, t * 2);
 }
 
-export function CarrotMesh({
-  snapshot,
-  diameterM = 0.025,
-  lengthM = 0.05,
-  centre = [0, 0, 0.055], // matches configs/scenarios/default.yaml carrot.position + half length
-}: Props) {
+/**
+ * Map ``carrot_axis`` (Python's 0=x, 1=y, 2=z) + cylinder local-Y
+ * convention into a world-space rotation tuple.
+ * - axis=0 (world +x): rotate local-Y → world-X by +π/2 about world Z
+ * - axis=1 (world +y): identity (local-Y already aligns with world-Y)
+ * - axis=2 (world +z): rotate local-Y → world-Z by +π/2 about world X
+ *
+ * For axis=z, the Python anchor is the *base* of the cylinder; the
+ * cylinder geometry is centred on its midpoint, so we offset the
+ * group +length/2 along the axis. For axis=x/y the anchor is already
+ * the centre, no offset.
+ */
+function poseFromAxis(
+  axis: number,
+  centre: [number, number, number],
+  lengthM: number,
+): { position: [number, number, number]; rotation: [number, number, number] } {
+  if (axis === 0) {
+    return { position: centre, rotation: [0, 0, Math.PI / 2] };
+  }
+  if (axis === 1) {
+    return { position: centre, rotation: [0, 0, 0] };
+  }
+  // axis === 2 (z): legacy vertical, anchor is base.
+  return {
+    position: [centre[0], centre[1], centre[2] + lengthM / 2],
+    rotation: [Math.PI / 2, 0, 0],
+  };
+}
+
+export function CarrotMesh({ snapshot }: Props) {
   const color = useMemo(() => {
-    // Average both retentions when the second solute is active; otherwise
-    // use the primary. Detection: retention2 ≈ 100 (default for disabled)
-    // still nudges the colour slightly; fine for a live indicator.
     const dual = snapshot.carrot_retention2 < 99.99;
     const r = dual
       ? (snapshot.carrot_retention + snapshot.carrot_retention2) * 0.5
@@ -63,14 +69,30 @@ export function CarrotMesh({
     return retentionToColor(r);
   }, [snapshot.carrot_retention, snapshot.carrot_retention2]);
 
+  const diameterM = snapshot.carrot_diameter_m;
+  const lengthM = snapshot.carrot_length_m;
+  const axis = snapshot.carrot_axis;
+
+  // Empty pool (rebuild marker frames carry carrot_count=0): render nothing.
+  if (snapshot.carrot_count === 0 || snapshot.carrot_centres.length === 0) {
+    return null;
+  }
+
   return (
-    <group position={centre} rotation={[Math.PI / 2, 0, 0]}>
-      {/* Cylinder's axis is along local Y; the group rotation above maps
-          local-Y → world-Z, matching the physics scenario's carrot axis. */}
-      <mesh>
-        <cylinderGeometry args={[diameterM / 2, diameterM / 2, lengthM, 32, 1]} />
-        <meshStandardMaterial color={color} roughness={0.55} />
-      </mesh>
-    </group>
+    <>
+      {snapshot.carrot_centres.map((centre, idx) => {
+        const { position, rotation } = poseFromAxis(axis, centre, lengthM);
+        return (
+          <group key={idx} position={position} rotation={rotation}>
+            <mesh>
+              <cylinderGeometry
+                args={[diameterM / 2, diameterM / 2, lengthM, 32, 1]}
+              />
+              <meshStandardMaterial color={color} roughness={0.55} />
+            </mesh>
+          </group>
+        );
+      })}
+    </>
   );
 }

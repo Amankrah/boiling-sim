@@ -23,6 +23,11 @@ export interface CarrotDraft {
   diameter_m: number;
   length_m: number;
   position: [number, number, number];
+  /** Number of identical carrot instances (1-64). count=1 keeps the
+   *  legacy single-carrot behaviour; >1 triggers auto-placement. */
+  count: number;
+  /** Cylinder axis. "z" is legacy vertical; "x"/"y" are horizontal. */
+  axis: "x" | "y" | "z";
   initial_beta_carotene_mg_per_100g: number;
 }
 
@@ -196,6 +201,8 @@ export const DEFAULT_DRAFT: ScenarioDraft = {
     diameter_m: 0.025,
     length_m: 0.05,
     position: [0.0, 0.0, 0.03],
+    count: 1,
+    axis: "z",
     initial_beta_carotene_mg_per_100g: 8.3,
   },
   heating: {

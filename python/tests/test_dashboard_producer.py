@@ -70,6 +70,10 @@ def test_snapshot_has_all_schema_fields(sim_dual):
         # v4 additions
         "pot_diameter_m", "pot_height_m",
         "pot_wall_thickness_m", "pot_base_thickness_m",
+        # v6 additions: multi-carrot pose
+        "carrot_count", "carrot_axis",
+        "carrot_diameter_m", "carrot_length_m",
+        "carrot_centres", "carrot_total_mass_g",
     }
     assert set(snap.keys()) == expected_fields, (
         f"missing/extra keys: "

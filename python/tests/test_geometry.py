@@ -203,12 +203,46 @@ def test_wall_mat_matches_sdf(grid):
     assert (sdf[wall] < 0).all(), "some pot-wall cells have sdf>=0"
 
 
+def test_n_carrot_cells_scales_linearly_with_count():
+    """Doubling cfg.carrot.count should roughly double the carrot cell
+    count (within 5 % discretization tolerance). Sanity check that
+    multi-carrot rasterization is actually emitting multiple instances.
+    """
+    cfg_one = load_scenario(DEFAULT_YAML)
+    cfg_one.carrot.count = 1
+    cfg_one.carrot.axis = "x"
+    cfg_one.carrot.length_m = 0.040  # shorter so 1 fits the legacy pot
+    cfg_one.grid.dx_m = 0.002
+    grid_one = build_pot_geometry(cfg_one)
+    n_one = int((grid_one.mat.numpy() == MAT_CARROT).sum())
+
+    cfg_three = load_scenario(DEFAULT_YAML)
+    cfg_three.carrot.count = 3
+    cfg_three.carrot.axis = "x"
+    cfg_three.carrot.length_m = 0.040
+    cfg_three.grid.dx_m = 0.002
+    grid_three = build_pot_geometry(cfg_three)
+    n_three = int((grid_three.mat.numpy() == MAT_CARROT).sum())
+
+    rel_err = abs(n_three - 3 * n_one) / float(3 * n_one)
+    assert rel_err < 0.05, (
+        f"3-carrot cell count {n_three} not ~3x single-carrot {n_one} "
+        f"(rel_err={rel_err*100:.1f}%)"
+    )
+
+
 def test_carrot_mat_count_matches_analytic(grid, default_cfg):
-    """Carrot cell count ≈ π·r²·L / dx³ within 5 % (discretization)."""
+    """Carrot cell count ≈ count·π·r²·L / dx³ within 5 % (discretization).
+
+    Multi-carrot generalisation: total voxel count scales linearly with
+    ``cfg.carrot.count``; orientation does not affect the volume.
+    """
     mat = grid.mat.numpy()
     carrot_cells = int((mat == MAT_CARROT).sum())
-    carrot_vol = math.pi * (default_cfg.carrot.diameter_m / 2) ** 2 * default_cfg.carrot.length_m
-    expected = carrot_vol / grid.dx ** 3
+    per_carrot_vol = (
+        math.pi * (default_cfg.carrot.diameter_m / 2) ** 2 * default_cfg.carrot.length_m
+    )
+    expected = default_cfg.carrot.count * per_carrot_vol / grid.dx ** 3
     rel_err = abs(carrot_cells - expected) / expected
     assert rel_err < 0.05, f"carrot cell error {rel_err*100:.1f}% > 5%"
 

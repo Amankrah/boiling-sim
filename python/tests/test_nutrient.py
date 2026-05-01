@@ -257,6 +257,13 @@ def test_diffusion_analytic_1d_slab():
     cfg = load_scenario("configs/scenarios/default.yaml")
     cfg.nutrient.enabled = True
     cfg.grid.dx_m = 0.002
+    # Pin to the legacy single-carrot vertical layout. This test seeds a
+    # cosine mode along z and depends on a single connected carrot blob
+    # spanning a contiguous z-range; multi-carrot horizontal layouts
+    # break that 1-D assumption.
+    cfg.carrot.count = 1
+    cfg.carrot.axis = "z"
+    cfg.carrot.position = (0.0, 0.0, 0.03)
     # Artificially boost D_eff so the decay is observable inside a short test
     # run. Mode decay rate scales linearly with D, so the analytic target
     # scales exactly the same way. (Real D_eff stays 2e-10 in production.)

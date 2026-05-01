@@ -21,14 +21,20 @@
 // page. Previously the pot was hardcoded at 20 cm × 12 cm regardless
 // of cfg.pot.
 //
-// v5 (this — raw-bytes T/alpha): the temperature and alpha fields
-// arrive as msgpack `bin` chunks (raw little-endian f32 bytes) rather
-// than `array<f32>`. ~30x cheaper on the Python side (.tobytes() vs
-// .tolist() over a 692k-cell field saved ~278 ms/sim-s at 15 Hz).
-// The decoder in useSnapshot.ts copies into an aligned ArrayBuffer
-// and reinterprets as Float32Array before the snapshot reaches React
-// state, so consumers see typed arrays instead of Uint8Arrays.
-export const SCHEMA_VERSION = 5;
+// v5 (superseded): the temperature and alpha fields arrive as
+// msgpack `bin` chunks (raw little-endian f32 bytes) rather than
+// `array<f32>`. The decoder in useSnapshot.ts reinterprets the
+// Uint8Array payload as a Float32Array before the snapshot reaches
+// React state.
+//
+// v6 (this — multi-carrot pose): adds carrot pose / quantity fields
+// so the dashboard can render N cylinders laying flat in the pot
+// (realistic stew) rather than one hardcoded vertical procedural
+// cylinder. carrot_count is the instance count, carrot_axis is the
+// cylinder axis (0=x, 1=y, 2=z), carrot_centres is one anchor per
+// instance, and carrot_total_mass_g is the derived UX quantity for
+// the Config page's live readout.
+export const SCHEMA_VERSION = 6;
 
 export interface GridMeta {
   nx: number;
@@ -88,6 +94,18 @@ export interface Snapshot {
   pot_height_m: number;
   pot_wall_thickness_m: number;
   pot_base_thickness_m: number;
+  // --- v6: carrot pose / quantity ---
+  /** Number of carrot instances; ``carrot_centres`` has this length. */
+  carrot_count: number;
+  /** Cylinder axis: 0=x, 1=y, 2=z. x/y mean horizontal, z is vertical. */
+  carrot_axis: number;
+  carrot_diameter_m: number;
+  carrot_length_m: number;
+  /** World-space anchor per carrot instance. For axis=2 (z) this is
+   *  the cylinder base; for axis 0/1 (x or y) it's the cylinder centre. */
+  carrot_centres: [number, number, number][];
+  /** Total carrot mass in grams (count·π·(d/2)²·L·ρ_carrot, ρ≈1040). */
+  carrot_total_mass_g: number;
 }
 
 /**

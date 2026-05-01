@@ -129,6 +129,12 @@ mod tests {
             pot_height_m: 0.12,
             pot_wall_thickness_m: 0.003,
             pot_base_thickness_m: 0.005,
+            carrot_count: 1,
+            carrot_axis: 2,
+            carrot_diameter_m: 0.025,
+            carrot_length_m: 0.05,
+            carrot_centres: vec![[0.0, 0.0, 0.03]],
+            carrot_total_mass_g: 25.5,
         }
     }
 

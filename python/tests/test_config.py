@@ -86,3 +86,52 @@ def test_initial_conditions_invalid_mode_rejected():
 def test_initial_conditions_preheat_range_enforced():
     with pytest.raises(ValidationError):
         InitialConditionsConfig(mode="preheat", preheat_water_c=200.0)
+
+
+# ---------------------------------------------------------------------------
+# v6: multi-carrot count + axis + auto-placement
+# ---------------------------------------------------------------------------
+
+
+def test_carrot_count_default_is_one():
+    """Backward-compat: every existing benchmark/test relies on
+    count=1 unless they explicitly opt into multi-carrot."""
+    cfg = CarrotConfig()
+    assert cfg.count == 1
+    assert cfg.axis == "z"
+
+
+def test_carrot_count_axis_validates_in_pot():
+    """3 horizontal carrots auto-place inside the default pot."""
+    cfg = ScenarioConfig.model_validate({
+        "carrot": {
+            "count": 3,
+            "axis": "x",
+            "diameter_m": 0.025,
+            "length_m": 0.06,
+            "position": [0.0, 0.0, 0.04],
+        }
+    })
+    assert cfg.carrot.count == 3
+    # ~91.9 g for 3 × 60 mm × 25 mm carrots at ρ=1040.
+    assert 80 < cfg.carrot.total_mass_g() < 105
+
+
+def test_overcrowded_pot_rejected_at_validation():
+    """64 large carrots cannot all fit inside a 20 cm pot."""
+    with pytest.raises(ValidationError):
+        ScenarioConfig.model_validate({
+            "carrot": {
+                "count": 64,
+                "axis": "x",
+                "diameter_m": 0.040,  # 40 mm dia, 64 of them packed: way too wide
+                "length_m": 0.060,
+                "position": [0.0, 0.0, 0.040],
+            }
+        })
+
+
+def test_carrot_axis_invalid_value_rejected():
+    """Pydantic Literal must reject anything outside {x,y,z}."""
+    with pytest.raises(ValidationError):
+        CarrotConfig(axis="diagonal")  # type: ignore[arg-type]

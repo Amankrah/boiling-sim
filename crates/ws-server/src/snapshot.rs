@@ -55,7 +55,7 @@ use serde::{Deserialize, Serialize};
 /// `pot_wall_thickness_m`, and `pot_base_thickness_m` flow from
 /// Python's `cfg.pot` onto the wire and drive `<Pot>`'s props.
 ///
-/// **v5** (this — raw-bytes T/alpha): replaces the `Vec<f32>` arrays for
+/// **v5** (superseded): replaces the `Vec<f32>` arrays for
 /// `temperature` and `alpha` with msgpack `bin` (raw little-endian f32
 /// bytes). At dx = 2 mm and the realistic-pot default config the
 /// downsampled fields are 692k cells each, and `numpy.tolist()` was
@@ -63,10 +63,19 @@ use serde::{Deserialize, Serialize};
 /// 9.79 ms per field, ~30 % of the snapshot budget. `tobytes()` runs
 /// in ~0.5 ms (19× faster). Browser-side decode reinterprets the
 /// `Uint8Array` payload as a `Float32Array`. Endianness is fixed at
-/// little-endian — the assumption holds for x86 and ARM hosts; a
-/// big-endian host would observe garbled values, so the codepath
-/// asserts on hosts where it would silently corrupt.
-pub const SCHEMA_VERSION: u32 = 5;
+/// little-endian — the assumption holds for x86 and ARM hosts.
+///
+/// **v6** (this — multi-carrot pose): adds carrot pose and quantity
+/// fields so the dashboard can render N cylinders laying flat in the
+/// pot rather than the single hardcoded vertical procedural cylinder.
+/// The aggregate retention scalars (`carrot_retention*`) are unchanged
+/// — per-instance retention is a future feature requiring labelled
+/// cells. New fields: `carrot_count`, `carrot_axis` (0=x, 1=y, 2=z),
+/// `carrot_diameter_m`, `carrot_length_m`, `carrot_centres` (length =
+/// count, world-space anchor per instance), `carrot_total_mass_g`
+/// (derived: count·π·(d/2)²·L·ρ_carrot, displayed live in the Config
+/// page).
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// Errors surfaced by [`Snapshot::from_msgpack_bytes`].
 #[derive(Debug, thiserror::Error)]
@@ -221,6 +230,28 @@ pub struct Snapshot {
     /// Base thickness in metres. Raises the inner floor off the
     /// cooktop by this much.
     pub pot_base_thickness_m: f32,
+
+    // -------- v6: carrot pose / quantity --------
+    /// Number of carrot instances in the pot (matches Python
+    /// `cfg.carrot.count`). The dashboard renders one cylinder per
+    /// instance; ``carrot_centres`` has this many entries.
+    pub carrot_count: u32,
+    /// Cylinder axis (0=x, 1=y, 2=z). Drives the `<CarrotMesh>`
+    /// rotation and the auto-placement layout: x/y mean horizontal
+    /// (carrots lay flat — realistic stew), z is the legacy vertical.
+    pub carrot_axis: u8,
+    /// Per-carrot diameter (metres). All instances share one shape.
+    pub carrot_diameter_m: f32,
+    /// Per-carrot length (metres). All instances share one shape.
+    pub carrot_length_m: f32,
+    /// World-space anchor per instance. For axis = 2 (z), the anchor
+    /// is the *base* of the cylinder; for axis 0/1 (x or y), it's the
+    /// *centre*. Length equals ``carrot_count``.
+    pub carrot_centres: Vec<[f32; 3]>,
+    /// Total carrot mass in grams, derived from count + dimensions
+    /// and a fixed density (~1040 kg/m³). Displayed live in the Config
+    /// page so the user knows "I'm cooking 200 g".
+    pub carrot_total_mass_g: f32,
 }
 
 impl Snapshot {
@@ -305,6 +336,17 @@ mod tests {
             pot_height_m: 0.12,
             pot_wall_thickness_m: 0.003,
             pot_base_thickness_m: 0.005,
+            // v6: 3 horizontal carrots in the default pot.
+            carrot_count: 3,
+            carrot_axis: 0,
+            carrot_diameter_m: 0.025,
+            carrot_length_m: 0.060,
+            carrot_centres: vec![
+                [0.0, -0.030, 0.040],
+                [0.0,  0.000, 0.040],
+                [0.0,  0.030, 0.040],
+            ],
+            carrot_total_mass_g: 91.9,
         }
     }
 

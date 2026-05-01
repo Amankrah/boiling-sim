@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 # Wire-format version. MUST stay in lockstep with crates/ws-server/src/snapshot.rs
 # (see the CHANGELOG comment at the top of that file for v1 -> v2 changes).
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION: int = 5
+SCHEMA_VERSION: int = 6
 
 
 # Display names for the Phase-4-validated solutes. Keyed to the
@@ -93,6 +93,37 @@ def _downsample_halves(field: np.ndarray) -> np.ndarray:
     ``Snapshot::temperature`` documents (k fastest, i slowest).
     """
     return np.ascontiguousarray(field[::2, ::2, ::2], dtype=np.float32)
+
+
+_AXIS_TO_INT = {"x": 0, "y": 1, "z": 2}
+
+
+def _axis_to_int(axis: str) -> int:
+    """Map cfg.carrot.axis literal to the wire-format integer (0=x, 1=y, 2=z)."""
+    return _AXIS_TO_INT.get(axis, 2)
+
+
+def _carrot_centres(cfg: Any) -> list[list[float]]:
+    """Compute carrot instance centres from cfg using the same auto-placement
+    routine geometry.py uses to voxelize. Returned as a length-``count`` list
+    of ``[x, y, z]`` lists (msgpack-friendly)."""
+    from .config import auto_place_carrots
+    inner_radius = cfg.pot.diameter_m / 2 - cfg.pot.wall_thickness_m
+    water_height = cfg.water.fill_fraction * (
+        cfg.pot.height_m - cfg.pot.base_thickness_m
+    )
+    water_top_z = cfg.pot.base_thickness_m + water_height
+    centres = auto_place_carrots(
+        count=cfg.carrot.count,
+        axis=cfg.carrot.axis,
+        anchor=cfg.carrot.position,
+        diameter_m=cfg.carrot.diameter_m,
+        length_m=cfg.carrot.length_m,
+        inner_radius=inner_radius,
+        base_thickness=cfg.pot.base_thickness_m,
+        water_top_z=water_top_z,
+    )
+    return [[float(c[0]), float(c[1]), float(c[2])] for c in centres]
 
 
 def _grid_meta(nx: int, ny: int, nz: int, dx: float, origin: tuple[float, float, float]) -> dict[str, Any]:
@@ -240,6 +271,18 @@ def build_snapshot(
         "pot_height_m": float(cfg.pot.height_m),
         "pot_wall_thickness_m": float(cfg.pot.wall_thickness_m),
         "pot_base_thickness_m": float(cfg.pot.base_thickness_m),
+        # --- v6: carrot pose / quantity ---
+        # The browser draws N cylinders -- one per centre -- with the
+        # given diameter / length / axis. ``carrot_total_mass_g`` is the
+        # derived UX quantity (count * pi * (d/2)^2 * length * rho_carrot).
+        # Per-instance retention is a future extension; for now all
+        # instances share the aggregate ``carrot_retention*`` scalars.
+        "carrot_count": int(cfg.carrot.count),
+        "carrot_axis": _axis_to_int(cfg.carrot.axis),
+        "carrot_diameter_m": float(cfg.carrot.diameter_m),
+        "carrot_length_m": float(cfg.carrot.length_m),
+        "carrot_centres": _carrot_centres(cfg),
+        "carrot_total_mass_g": float(cfg.carrot.total_mass_g()),
     }
 
 
@@ -555,5 +598,13 @@ def serialize_rebuild_marker(
         "pot_height_m": 0.0,
         "pot_wall_thickness_m": 0.0,
         "pot_base_thickness_m": 0.0,
+        # v6 -- carrot pose / quantity. Same rationale: zeros during
+        # rebuild; the next snapshot carries the real values.
+        "carrot_count": 0,
+        "carrot_axis": 2,
+        "carrot_diameter_m": 0.0,
+        "carrot_length_m": 0.0,
+        "carrot_centres": [],
+        "carrot_total_mass_g": 0.0,
     }
     return msgpack.packb(payload, use_bin_type=True)

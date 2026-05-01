@@ -126,7 +126,9 @@ def populate_material_ids(
     water_alpha: wp.array3d(dtype=float),
     origin: wp.vec3,
     dx: float,
-    carrot_pos: wp.vec3,
+    carrot_centres: wp.array(dtype=wp.vec3),
+    carrot_count: int,
+    carrot_axis: int,    # 0=x, 1=y, 2=z
     carrot_radius: float,
     carrot_length: float,
     mat_fluid: int,
@@ -137,6 +139,12 @@ def populate_material_ids(
     """Stamp each cell with a material ID.
 
     Precedence (highest first): pot wall → carrot → water → air.
+
+    Multi-carrot: ``carrot_centres`` is a length-``carrot_count`` array
+    of vec3 anchor points. For ``carrot_axis == 2`` (legacy z), the
+    anchor is the *base* of the cylinder (extends +length along +z);
+    for axis 0/1 (horizontal x or y), the anchor is the *centre* and
+    the cylinder extends ±length/2 along that axis.
     """
     i, j, k = wp.tid()
     p = origin + wp.vec3(float(i) + 0.5, float(j) + 0.5, float(k) + 0.5) * dx
@@ -146,12 +154,32 @@ def populate_material_ids(
         mat[i, j, k] = mat_pot_wall
         return
 
-    # Carrot: axis-aligned cylinder centred at carrot_pos, extending +length along z.
-    rel = p - carrot_pos
-    r_xy = wp.sqrt(rel[0] * rel[0] + rel[1] * rel[1])
-    if r_xy < carrot_radius and rel[2] > 0.0 and rel[2] < carrot_length:
-        mat[i, j, k] = mat_carrot
-        return
+    # Carrot test against each instance. count is small (<=64) and the
+    # cell is exited early on the first hit, so this stays cheap.
+    half_len = carrot_length * float(0.5)
+    for c in range(carrot_count):
+        rel = p - carrot_centres[c]
+        if carrot_axis == 0:
+            # Horizontal along +x: anchor is centre, axial range ±L/2.
+            r_perp = wp.sqrt(rel[1] * rel[1] + rel[2] * rel[2])
+            along = rel[0]
+            if r_perp < carrot_radius and along > -half_len and along < half_len:
+                mat[i, j, k] = mat_carrot
+                return
+        elif carrot_axis == 1:
+            # Horizontal along +y.
+            r_perp = wp.sqrt(rel[0] * rel[0] + rel[2] * rel[2])
+            along = rel[1]
+            if r_perp < carrot_radius and along > -half_len and along < half_len:
+                mat[i, j, k] = mat_carrot
+                return
+        else:
+            # Vertical (legacy): anchor is the base, axial range [0, L].
+            r_perp = wp.sqrt(rel[0] * rel[0] + rel[1] * rel[1])
+            along = rel[2]
+            if r_perp < carrot_radius and along > float(0.0) and along < carrot_length:
+                mat[i, j, k] = mat_carrot
+                return
 
     # Water (liquid phase).
     if water_alpha[i, j, k] > 0.5:
@@ -301,7 +329,24 @@ def build_pot_geometry(cfg: ScenarioConfig, device: str = "cuda:0") -> Grid:
     water_height = cfg.water.fill_fraction * h_inner
     water_line_z = base_thickness + water_height
 
-    carrot_pos = wp.vec3(*cfg.carrot.position)
+    # Auto-place N carrots from the config (count + axis + anchor).
+    # count==1 returns [position] unchanged so legacy single-carrot
+    # scenarios voxelize identically.
+    from .config import auto_place_carrots
+    centres = auto_place_carrots(
+        count=cfg.carrot.count,
+        axis=cfg.carrot.axis,
+        anchor=cfg.carrot.position,
+        diameter_m=cfg.carrot.diameter_m,
+        length_m=cfg.carrot.length_m,
+        inner_radius=r_inner,
+        base_thickness=base_thickness,
+        water_top_z=water_line_z,
+    )
+    carrot_centres_np = np.array(centres, dtype=np.float32)
+    carrot_centres = wp.array(carrot_centres_np, dtype=wp.vec3, device=device)
+    carrot_count_int = len(centres)
+    carrot_axis_int = {"x": 0, "y": 1, "z": 2}[cfg.carrot.axis]
     carrot_radius = cfg.carrot.diameter_m / 2
     carrot_length = cfg.carrot.length_m
 
@@ -343,7 +388,9 @@ def build_pot_geometry(cfg: ScenarioConfig, device: str = "cuda:0") -> Grid:
             water_alpha,
             wp.vec3(*origin),
             dx,
-            carrot_pos,
+            carrot_centres,
+            carrot_count_int,
+            carrot_axis_int,
             carrot_radius,
             carrot_length,
             MAT_FLUID,
