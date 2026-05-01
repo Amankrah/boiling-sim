@@ -31,46 +31,69 @@ describe("TypeScript snapshot decode path", () => {
       return;
     }
 
-    const snap = msgpackDecode(bytes) as Snapshot;
-    expect(snap.version).toBe(SCHEMA_VERSION);
-    expect(typeof snap.t_sim).toBe("number");
-    expect(typeof snap.step).toBe("number");
-    expect(typeof snap.is_rebuilding).toBe("boolean");
-    expect(typeof snap.is_paused).toBe("boolean");
+    // v5 wire format: temperature/alpha arrive as Uint8Array (msgpack
+    // bin). The hook decoder converts them into Float32Arrays before
+    // exposing the snapshot to React; this test mirrors that step.
+    const raw = msgpackDecode(bytes) as Omit<
+      Snapshot,
+      "temperature" | "alpha"
+    > & { temperature: Uint8Array; alpha: Uint8Array };
+    expect(raw.version).toBe(SCHEMA_VERSION);
+    expect(typeof raw.t_sim).toBe("number");
+    expect(typeof raw.step).toBe("number");
+    expect(typeof raw.is_rebuilding).toBe("boolean");
+    expect(typeof raw.is_paused).toBe("boolean");
 
     // Grid metadata.
-    expect(snap.grid_ds.nx).toBe(snap.grid.nx >> 1);
-    expect(snap.grid_ds.ny).toBe(snap.grid.ny >> 1);
-    expect(snap.grid_ds.nz).toBe(snap.grid.nz >> 1);
+    expect(raw.grid_ds.nx).toBe(raw.grid.nx >> 1);
+    expect(raw.grid_ds.ny).toBe(raw.grid.ny >> 1);
+    expect(raw.grid_ds.nz).toBe(raw.grid.nz >> 1);
 
-    // Buffer sizes match downsampled grid cell count.
-    const expectedLen = snap.grid_ds.nx * snap.grid_ds.ny * snap.grid_ds.nz;
-    expect(snap.temperature.length).toBe(expectedLen);
-    expect(snap.alpha.length).toBe(expectedLen);
+    // Buffer sizes: bin payload is 4 bytes/cell.
+    const expectedLen = raw.grid_ds.nx * raw.grid_ds.ny * raw.grid_ds.nz;
+    expect(raw.temperature.byteLength).toBe(expectedLen * 4);
+    expect(raw.alpha.byteLength).toBe(expectedLen * 4);
+
+    // Reinterpret bytes as f32 (test-side mirror of f32ArrayFromBytes).
+    const tBuf = new ArrayBuffer(raw.temperature.byteLength);
+    new Uint8Array(tBuf).set(raw.temperature);
+    const temperature = new Float32Array(tBuf);
+    const aBuf = new ArrayBuffer(raw.alpha.byteLength);
+    new Uint8Array(aBuf).set(raw.alpha);
+    const alpha = new Float32Array(aBuf);
+    expect(temperature.length).toBe(expectedLen);
+    expect(alpha.length).toBe(expectedLen);
 
     // Retention fields make physical sense.
-    expect(snap.carrot_retention).toBeGreaterThanOrEqual(0);
-    expect(snap.carrot_retention).toBeLessThanOrEqual(100.5);
-    expect(snap.carrot_retention2).toBeGreaterThanOrEqual(0);
-    expect(snap.carrot_retention2).toBeLessThanOrEqual(100.5);
+    expect(raw.carrot_retention).toBeGreaterThanOrEqual(0);
+    expect(raw.carrot_retention).toBeLessThanOrEqual(100.5);
+    expect(raw.carrot_retention2).toBeGreaterThanOrEqual(0);
+    expect(raw.carrot_retention2).toBeLessThanOrEqual(100.5);
 
     // Temperature should be in Celsius (sane range for a warm-start sim).
-    const tMin = Math.min(...snap.temperature);
-    const tMax = Math.max(...snap.temperature);
+    // Math.min(...) on a 1.4M-element Float32Array can blow the call stack;
+    // use a fold instead.
+    let tMin = Infinity;
+    let tMax = -Infinity;
+    for (let i = 0; i < temperature.length; i++) {
+      const v = temperature[i];
+      if (v < tMin) tMin = v;
+      if (v > tMax) tMax = v;
+    }
     expect(tMin).toBeGreaterThanOrEqual(-5);
     expect(tMax).toBeLessThanOrEqual(200);
 
     // v4: pot geometry echo. Defaults come from the scenario YAML
     // (0.20 m diameter, 0.12 m height, 3 mm wall, 5 mm base); allow a
     // broad sanity band.
-    expect(snap.pot_diameter_m).toBeGreaterThan(0.05);
-    expect(snap.pot_diameter_m).toBeLessThan(0.60);
-    expect(snap.pot_height_m).toBeGreaterThan(0.02);
-    expect(snap.pot_height_m).toBeLessThan(0.50);
-    expect(snap.pot_wall_thickness_m).toBeGreaterThan(0);
-    expect(snap.pot_wall_thickness_m).toBeLessThan(snap.pot_diameter_m / 2);
-    expect(snap.pot_base_thickness_m).toBeGreaterThan(0);
-    expect(snap.pot_base_thickness_m).toBeLessThan(snap.pot_height_m);
+    expect(raw.pot_diameter_m).toBeGreaterThan(0.05);
+    expect(raw.pot_diameter_m).toBeLessThan(0.60);
+    expect(raw.pot_height_m).toBeGreaterThan(0.02);
+    expect(raw.pot_height_m).toBeLessThan(0.50);
+    expect(raw.pot_wall_thickness_m).toBeGreaterThan(0);
+    expect(raw.pot_wall_thickness_m).toBeLessThan(raw.pot_diameter_m / 2);
+    expect(raw.pot_base_thickness_m).toBeGreaterThan(0);
+    expect(raw.pot_base_thickness_m).toBeLessThan(raw.pot_height_m);
   });
 
   // NB: fzstd is decompress-only; the inverse (zstd encode) lives on the

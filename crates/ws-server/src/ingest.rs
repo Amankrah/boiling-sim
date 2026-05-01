@@ -100,8 +100,9 @@ mod tests {
             is_paused: false,
             grid: GridMeta { nx: 4, ny: 4, nz: 4, dx: 0.002, origin: [0.0; 3] },
             grid_ds: GridMeta { nx: 2, ny: 2, nz: 2, dx: 0.004, origin: [0.0; 3] },
-            temperature: vec![95.0; 8],
-            alpha: vec![1.0; 8],
+            // v5: raw little-endian f32 bytes (4 bytes/cell). 8 cells = 32 bytes.
+            temperature: vec![0u8; 32],
+            alpha: vec![0u8; 32],
             bubbles: vec![BubbleState { position: [0.0; 3], radius: 1e-4 }],
             nutrient_primary_name: "β-carotene".into(),
             nutrient_secondary_name: String::new(),

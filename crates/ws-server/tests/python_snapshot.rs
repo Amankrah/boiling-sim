@@ -46,14 +46,16 @@ fn python_msgpack_deserializes_and_matches_schema() {
     assert_eq!(snap.grid_ds.ny, snap.grid.ny / 2);
     assert_eq!(snap.grid_ds.nz, snap.grid.nz / 2);
 
-    // Buffer length matches the downsampled cell count.
-    let expected_len = (snap.grid_ds.nx * snap.grid_ds.ny * snap.grid_ds.nz) as usize;
+    // Buffer length matches the downsampled cell count. v5: raw bytes,
+    // 4 bytes/cell little-endian f32.
+    let expected_bytes =
+        (snap.grid_ds.nx * snap.grid_ds.ny * snap.grid_ds.nz) as usize * 4;
     assert_eq!(
         snap.temperature.len(),
-        expected_len,
-        "temperature buffer length != nx_ds*ny_ds*nz_ds"
+        expected_bytes,
+        "temperature byte length != 4 * nx_ds*ny_ds*nz_ds"
     );
-    assert_eq!(snap.alpha.len(), expected_len);
+    assert_eq!(snap.alpha.len(), expected_bytes);
 
     // Retention fields are the mass-partition percentages -- must sit in
     // [0, 100+eps]. At t < 1 s on a fresh default.yaml sim these should
@@ -71,17 +73,15 @@ fn python_msgpack_deserializes_and_matches_schema() {
 
     // Sanity-check temperature range: solver runs in Kelvin but the
     // producer converts to Celsius. Nothing should be below 0 C or
-    // above 200 C on a fresh warm-start.
-    let t_min = snap
+    // above 200 C on a fresh warm-start. v5 stores raw little-endian
+    // f32 bytes; reinterpret 4 bytes at a time before folding.
+    assert_eq!(snap.temperature.len() % 4, 0, "temperature length not 4-byte aligned");
+    let temp_iter = snap
         .temperature
-        .iter()
-        .cloned()
-        .fold(f32::INFINITY, f32::min);
-    let t_max = snap
-        .temperature
-        .iter()
-        .cloned()
-        .fold(f32::NEG_INFINITY, f32::max);
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+    let t_min = temp_iter.clone().fold(f32::INFINITY, f32::min);
+    let t_max = temp_iter.fold(f32::NEG_INFINITY, f32::max);
     assert!(
         t_min >= -5.0 && t_max <= 200.0,
         "temperature out of Celsius band: [{t_min}, {t_max}]"

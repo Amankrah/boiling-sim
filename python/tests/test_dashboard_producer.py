@@ -99,8 +99,11 @@ def test_downsampled_grid_is_half_resolution(sim_dual):
     assert grid_ds["ny"] == grid["ny"] // 2
     assert grid_ds["nz"] == grid["nz"] // 2
     expected_len = grid_ds["nx"] * grid_ds["ny"] * grid_ds["nz"]
-    assert len(snap["temperature"]) == expected_len
-    assert len(snap["alpha"]) == expected_len
+    # v5: temperature/alpha are raw little-endian f32 bytes (4 B/cell).
+    assert isinstance(snap["temperature"], bytes)
+    assert isinstance(snap["alpha"], bytes)
+    assert len(snap["temperature"]) == expected_len * 4
+    assert len(snap["alpha"]) == expected_len * 4
     # Downsampled dx is twice the full-res dx.
     assert snap["grid_ds"]["dx"] == pytest.approx(grid["dx"] * 2.0)
 
@@ -163,7 +166,8 @@ def test_v3_run_metadata_forwarded(sim_dual):
 
 def test_temperature_is_celsius_in_sane_range(sim_dual):
     snap = build_snapshot(sim_dual, step=0)
-    t_arr = np.asarray(snap["temperature"], dtype=np.float32)
+    # v5: temperature is raw little-endian f32 bytes; reinterpret.
+    t_arr = np.frombuffer(snap["temperature"], dtype=np.float32)
     # Fresh default.yaml start: water at initial_temp_c = 20, walls warming.
     # Nothing should be below 0 C (ice) or above 200 C (superheated pot).
     assert float(t_arr.min()) >= -5.0
@@ -195,10 +199,9 @@ def test_msgpack_roundtrip_preserves_structure(sim_dual):
     assert decoded["step"] == snap["step"]
     assert decoded["grid"] == snap["grid"]
     assert decoded["grid_ds"] == snap["grid_ds"]
-    # Arrays compare element-wise with float tolerance.
-    np.testing.assert_allclose(
-        decoded["temperature"], snap["temperature"], rtol=0, atol=0,
-        err_msg="temperature buffer altered by msgpack roundtrip",
+    # v5: temperature is raw bytes; msgpack `bin` is exact-byte round-trip.
+    assert decoded["temperature"] == snap["temperature"], (
+        "temperature buffer altered by msgpack roundtrip"
     )
 
 
@@ -207,7 +210,8 @@ def test_rebuild_marker_has_correct_flag():
     decoded = _unpack(buf)
     assert decoded["is_rebuilding"] is True
     assert decoded["is_paused"] is False
-    assert decoded["temperature"] == []
+    # v5: temperature is now a `bin` chunk; rebuild marker emits b"".
+    assert decoded["temperature"] == b""
     assert decoded["bubbles"] == []
     assert decoded["version"] == SCHEMA_VERSION
 

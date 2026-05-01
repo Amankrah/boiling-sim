@@ -15,12 +15,20 @@
 // the run finished and artefacts were written), last_error
 // (Pydantic validation failures from set_config messages).
 //
-// v4 (this — realistic pot): echoes the running sim's pot geometry
+// v4 (superseded): echoes the running sim's pot geometry
 // (diameter, height, wall + base thickness) so the 3D <Pot> component
 // can scale to match whatever the user picked on the Configuration
 // page. Previously the pot was hardcoded at 20 cm × 12 cm regardless
 // of cfg.pot.
-export const SCHEMA_VERSION = 4;
+//
+// v5 (this — raw-bytes T/alpha): the temperature and alpha fields
+// arrive as msgpack `bin` chunks (raw little-endian f32 bytes) rather
+// than `array<f32>`. ~30x cheaper on the Python side (.tobytes() vs
+// .tolist() over a 692k-cell field saved ~278 ms/sim-s at 15 Hz).
+// The decoder in useSnapshot.ts copies into an aligned ArrayBuffer
+// and reinterprets as Float32Array before the snapshot reaches React
+// state, so consumers see typed arrays instead of Uint8Arrays.
+export const SCHEMA_VERSION = 5;
 
 export interface GridMeta {
   nx: number;
@@ -43,8 +51,12 @@ export interface Snapshot {
   is_paused: boolean;
   grid: GridMeta;
   grid_ds: GridMeta;
-  temperature: number[];
-  alpha: number[];
+  // v5: msgpack `bin` on the wire; useSnapshot.ts converts the
+  // decoded Uint8Array into a Float32Array view before exposing
+  // the snapshot to React. Length equals
+  // `grid_ds.nx * grid_ds.ny * grid_ds.nz`.
+  temperature: Float32Array;
+  alpha: Float32Array;
   bubbles: BubbleState[];
   // --- nutrient identity (v2) ---
   nutrient_primary_name: string;

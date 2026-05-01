@@ -47,14 +47,26 @@ use serde::{Deserialize, Serialize};
 /// water-T row and a progress bar; the Results page fetches HDF5/CSV/JSON
 /// artefacts via the new `/api/runs/*` endpoints.
 ///
-/// **v4** (this — realistic pot): echoes the live pot geometry so the
+/// **v4** (superseded): echoes the live pot geometry so the
 /// 3D renderer can scale the procedural pot to whatever dimensions
 /// the running simulation actually uses. Previously the 3D pot was
 /// hardcoded at 20 cm × 12 cm regardless of the Config page's
 /// pot-section settings; now `pot_diameter_m`, `pot_height_m`,
 /// `pot_wall_thickness_m`, and `pot_base_thickness_m` flow from
 /// Python's `cfg.pot` onto the wire and drive `<Pot>`'s props.
-pub const SCHEMA_VERSION: u32 = 4;
+///
+/// **v5** (this — raw-bytes T/alpha): replaces the `Vec<f32>` arrays for
+/// `temperature` and `alpha` with msgpack `bin` (raw little-endian f32
+/// bytes). At dx = 2 mm and the realistic-pot default config the
+/// downsampled fields are 692k cells each, and `numpy.tolist()` was
+/// allocating 1.4 M Python floats per snapshot at 15 Hz — measured at
+/// 9.79 ms per field, ~30 % of the snapshot budget. `tobytes()` runs
+/// in ~0.5 ms (19× faster). Browser-side decode reinterprets the
+/// `Uint8Array` payload as a `Float32Array`. Endianness is fixed at
+/// little-endian — the assumption holds for x86 and ARM hosts; a
+/// big-endian host would observe garbled values, so the codepath
+/// asserts on hosts where it would silently corrupt.
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Errors surfaced by [`Snapshot::from_msgpack_bytes`].
 #[derive(Debug, thiserror::Error)]
@@ -116,11 +128,18 @@ pub struct Snapshot {
     /// Downsampled temperature field in Celsius. C-contiguous on
     /// `(nx, ny, nz)` = `(grid_ds.nx, grid_ds.ny, grid_ds.nz)` -- i.e. the
     /// k (z) axis is the fastest, i (x) axis slowest. Linear index
-    /// `idx = i*ny*nz + j*nz + k`. Length equals
-    /// `grid_ds.nx * grid_ds.ny * grid_ds.nz`.
-    pub temperature: Vec<f32>,
+    /// `idx = i*ny*nz + j*nz + k`.
+    ///
+    /// v5: raw little-endian f32 bytes (msgpack `bin` chunk). Length in
+    /// bytes equals `4 * grid_ds.nx * grid_ds.ny * grid_ds.nz`. The
+    /// Rust relay never reads the values; we only decode it to validate
+    /// the version field, then forward the raw frame to clients.
+    #[serde(with = "serde_bytes")]
+    pub temperature: Vec<u8>,
     /// Downsampled water void-fraction in [0, 1], same layout as `temperature`.
-    pub alpha: Vec<f32>,
+    /// v5: raw little-endian f32 bytes. See `temperature`.
+    #[serde(with = "serde_bytes")]
+    pub alpha: Vec<u8>,
 
     /// Active bubbles only (inactive pool slots filtered out by the producer).
     pub bubbles: Vec<BubbleState>,
@@ -249,8 +268,12 @@ mod tests {
                 dx: 0.004,
                 origin: [-0.1, -0.1, 0.0],
             },
-            temperature: vec![95.0; 50 * 50 * 30],
-            alpha: vec![1.0; 50 * 50 * 30],
+            // v5 raw-bytes fields: 4 bytes/cell little-endian f32.
+            // Filled with arbitrary repeating bytes since the Rust
+            // relay never reinterprets these as floats; we only check
+            // length.
+            temperature: vec![0x42u8; 50 * 50 * 30 * 4],
+            alpha: vec![0x3Fu8; 50 * 50 * 30 * 4],
             bubbles: vec![
                 BubbleState { position: [0.01, 0.0, 0.02], radius: 1.0e-4 },
                 BubbleState { position: [-0.01, 0.0, 0.03], radius: 2.0e-4 },
@@ -307,9 +330,11 @@ mod tests {
         assert_eq!(snap.grid_ds.nx, snap.grid.nx / 2);
         assert_eq!(snap.grid_ds.ny, snap.grid.ny / 2);
         assert_eq!(snap.grid_ds.nz, snap.grid.nz / 2);
-        let expected_len = (snap.grid_ds.nx * snap.grid_ds.ny * snap.grid_ds.nz) as usize;
-        assert_eq!(snap.temperature.len(), expected_len);
-        assert_eq!(snap.alpha.len(), expected_len);
+        // v5: temperature/alpha hold 4 bytes per cell (little-endian f32).
+        let expected_bytes =
+            (snap.grid_ds.nx * snap.grid_ds.ny * snap.grid_ds.nz) as usize * 4;
+        assert_eq!(snap.temperature.len(), expected_bytes);
+        assert_eq!(snap.alpha.len(), expected_bytes);
     }
 
     #[test]

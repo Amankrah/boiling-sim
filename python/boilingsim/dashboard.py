@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 # Wire-format version. MUST stay in lockstep with crates/ws-server/src/snapshot.rs
 # (see the CHANGELOG comment at the top of that file for v1 -> v2 changes).
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION: int = 4
+SCHEMA_VERSION: int = 5
 
 
 # Display names for the Phase-4-validated solutes. Keyed to the
@@ -198,8 +198,13 @@ def build_snapshot(
         "is_paused": bool(is_paused),
         "grid": _grid_meta(nx, ny, nz, grid.dx, origin),
         "grid_ds": _grid_meta(nx_ds, ny_ds, nz_ds, grid.dx * 2.0, origin),
-        "temperature": T_ds.tolist(),
-        "alpha": alpha_ds.tolist(),
+        # v5: raw little-endian f32 bytes. msgpack ``use_bin_type=True``
+        # encodes ``bytes`` as a ``bin`` chunk (1 + len bytes overhead),
+        # which is ~30x cheaper to produce than the per-cell Python-float
+        # allocation .tolist() did on a 692k-cell field. Browser-side
+        # decode reinterprets the Uint8Array buffer as a Float32Array.
+        "temperature": T_ds.tobytes(),
+        "alpha": alpha_ds.tobytes(),
         "bubbles": _active_bubbles(sim),
         # --- nutrient identity (v2) ---
         "nutrient_primary_name": _classify_nutrient(cfg.nutrient),
@@ -517,8 +522,10 @@ def serialize_rebuild_marker(
         "is_paused": False,
         "grid": _grid_meta(0, 0, 0, 0.0, (0.0, 0.0, 0.0)),
         "grid_ds": _grid_meta(0, 0, 0, 0.0, (0.0, 0.0, 0.0)),
-        "temperature": [],
-        "alpha": [],
+        # v5: temperature/alpha are msgpack `bin` (empty here for the
+        # rebuild marker so the Rust deserializer accepts the frame).
+        "temperature": b"",
+        "alpha": b"",
         "bubbles": [],
         "nutrient_primary_name": "",
         "nutrient_secondary_name": "",

@@ -15,6 +15,25 @@ import type {
 } from "../types/snapshot";
 import { SCHEMA_VERSION, summarizeSnapshot } from "../types/snapshot";
 
+/**
+ * Reinterpret a msgpack-decoded `Uint8Array` (raw little-endian f32
+ * bytes) as a `Float32Array`. Copies into a freshly-allocated
+ * `ArrayBuffer` because msgpack-decoder Uint8Arrays are slices into a
+ * larger buffer whose byteOffset is not guaranteed to be 4-byte
+ * aligned (a `Float32Array` view requires alignment). The copy runs
+ * at memcpy speed (~tens of µs for a 2.7 MB field at 15 Hz).
+ *
+ * Browsers are uniformly little-endian on x86 + ARM64 / Apple Silicon,
+ * which matches the Python producer's `numpy.tobytes()` layout. We do
+ * not handle big-endian hosts -- the dashboard would render garbled
+ * temperatures and the issue would be obvious immediately.
+ */
+function f32ArrayFromBytes(buf: Uint8Array): Float32Array {
+  const aligned = new ArrayBuffer(buf.byteLength);
+  new Uint8Array(aligned).set(buf);
+  return new Float32Array(aligned);
+}
+
 export interface UseSnapshotOptions {
   url: string;
   /** Max snapshots held in the history ring (for Recharts in M6). */
@@ -111,13 +130,27 @@ export function useSnapshot(options: UseSnapshotOptions): UseSnapshotReturn {
         try {
           const compressed = new Uint8Array(ev.data);
           const mpBytes = fzstdDecompress(compressed);
-          const decoded = msgpackDecode(mpBytes) as Snapshot;
-          if (decoded.version !== SCHEMA_VERSION) {
+          // v5: temperature/alpha arrive as Uint8Array (msgpack bin).
+          // Decode into a typed object whose float fields are real
+          // Float32Arrays before the snapshot reaches React state.
+          const raw = msgpackDecode(mpBytes) as Omit<
+            Snapshot,
+            "temperature" | "alpha"
+          > & {
+            temperature: Uint8Array;
+            alpha: Uint8Array;
+          };
+          if (raw.version !== SCHEMA_VERSION) {
             setLastError(
-              `schema version mismatch: got ${decoded.version}, expected ${SCHEMA_VERSION}. Rebuild your client.`,
+              `schema version mismatch: got ${raw.version}, expected ${SCHEMA_VERSION}. Rebuild your client.`,
             );
             return;
           }
+          const decoded: Snapshot = {
+            ...raw,
+            temperature: f32ArrayFromBytes(raw.temperature),
+            alpha: f32ArrayFromBytes(raw.alpha),
+          };
           setSnapshot(decoded);
           setFrameCount((n) => n + 1);
           setLastFrameAt(performance.now());
