@@ -1,29 +1,44 @@
-// Procedural-cylinder carrot renderer. v6: reads pose + count + axis
-// from the snapshot (Python's auto-placement output), so configurations
-// with N carrots laying flat (axis=0/1) render N cylinders correctly.
+// Procedural-cylinder ingredient renderer. v8: walks
+// ``snapshot.ingredients`` and renders one cylinder per instance per
+// ingredient, with a per-ingredient color palette driven by the
+// ingredient's ``name`` field.
 //
-// Colour mapping: high retention → vivid orange (fresh carrot),
-// low retention → muted brown (cooked-through). When both solutes
-// are active we average them. Per-instance retention is a future
-// extension (needs labelled cells); for now all instances share the
-// aggregate scalar.
+// Colour mapping: high retention → vivid fresh color (orange for
+// carrots, cream for potatoes, pale yellow for onions); low retention
+// → muted/charred variant. When both solutes are active we average
+// them. Per-instance retention is M3 infrastructure -- for ingredient
+// 0 (the legacy carrot) we look up the per-instance vector; other
+// ingredients use their aggregate `IngredientState.retention`.
 
 import { useMemo } from "react";
 import * as THREE from "three";
 
-import type { Snapshot } from "../types/snapshot";
+import type { IngredientState, Snapshot } from "../types/snapshot";
 
 interface Props {
   snapshot: Snapshot;
 }
 
-/** Three-stop gradient aligned to the `--accent-warm` token:
- *  fresh (vivid amber) → cooked (muted amber) → charred (dark brown). */
-function retentionToColor(retentionPct: number): THREE.Color {
+/** Three-stop gradient per ingredient name. Each palette has fresh /
+ *  cooked / charred stops; retention picks the interpolant. Unknown
+ *  names fall back to the carrot palette so user-defined ingredient
+ *  names still render. */
+const INGREDIENT_PALETTES: Record<
+  string,
+  { fresh: string; cooked: string; charred: string }
+> = {
+  carrot: { fresh: "#f5a524", cooked: "#a46419", charred: "#3a2614" },
+  potato: { fresh: "#e8d6a5", cooked: "#b89968", charred: "#54422a" },
+  onion: { fresh: "#f3e9c4", cooked: "#cfbe85", charred: "#7a6a3c" },
+  celery: { fresh: "#bccf63", cooked: "#7e8d36", charred: "#3c4516" },
+};
+
+function retentionToColor(retentionPct: number, name: string): THREE.Color {
+  const palette = INGREDIENT_PALETTES[name] ?? INGREDIENT_PALETTES.carrot;
   const t = Math.max(0, Math.min(1, retentionPct / 100));
-  const fresh = new THREE.Color("#f5a524"); // --accent-warm
-  const cooked = new THREE.Color("#a46419"); // 40% darker
-  const charred = new THREE.Color("#3a2614"); // dark brown
+  const fresh = new THREE.Color(palette.fresh);
+  const cooked = new THREE.Color(palette.cooked);
+  const charred = new THREE.Color(palette.charred);
   if (t > 0.5) {
     return cooked.lerp(fresh, (t - 0.5) * 2);
   }
@@ -60,39 +75,71 @@ function poseFromAxis(
   };
 }
 
+/** Render one ingredient's instances. Per-instance retention is
+ *  available for ingredient 0 (the legacy carrot) via M3's
+ *  ``carrot_retention_per_instance`` vector; other ingredients get a
+ *  uniform color from their aggregate retention. */
+function renderIngredient(
+  ing: IngredientState,
+  ingIdx: number,
+  snapshot: Snapshot,
+): JSX.Element[] {
+  const dual = ing.retention2 < 99.99;
+  // Ingredient 0 has access to per-instance retention (M3); others fall
+  // back to the aggregate so multi-instance potato pieces still color
+  // sensibly.
+  const perInstance =
+    ingIdx === 0 ? snapshot.carrot_retention_per_instance : [];
+  const perInstance2 =
+    ingIdx === 0 ? snapshot.carrot_retention2_per_instance : [];
+  const havePerInstance = perInstance.length === ing.centres.length;
+
+  return ing.centres.map((centre, idx) => {
+    const { position, rotation } = poseFromAxis(ing.axis, centre, ing.length_m);
+    let r = ing.retention;
+    let r2 = ing.retention2;
+    if (havePerInstance) {
+      r = perInstance[idx] ?? ing.retention;
+      if (perInstance2.length === perInstance.length) {
+        r2 = perInstance2[idx] ?? ing.retention2;
+      }
+    }
+    const blend = dual ? (r + r2) * 0.5 : r;
+    const color = retentionToColor(blend, ing.name);
+    return (
+      <group
+        key={`ing-${ingIdx}-inst-${idx}`}
+        position={position}
+        rotation={rotation}
+      >
+        <mesh>
+          <cylinderGeometry
+            args={[ing.diameter_m / 2, ing.diameter_m / 2, ing.length_m, 32, 1]}
+          />
+          <meshStandardMaterial color={color} roughness={0.55} />
+        </mesh>
+      </group>
+    );
+  });
+}
+
 export function CarrotMesh({ snapshot }: Props) {
-  const color = useMemo(() => {
-    const dual = snapshot.carrot_retention2 < 99.99;
-    const r = dual
-      ? (snapshot.carrot_retention + snapshot.carrot_retention2) * 0.5
-      : snapshot.carrot_retention;
-    return retentionToColor(r);
-  }, [snapshot.carrot_retention, snapshot.carrot_retention2]);
+  // v8: walk snapshot.ingredients[]; legacy single-carrot scenarios
+  // surface as a one-element list. Empty during rebuild markers --
+  // render nothing.
+  const ingredients = snapshot.ingredients ?? [];
 
-  const diameterM = snapshot.carrot_diameter_m;
-  const lengthM = snapshot.carrot_length_m;
-  const axis = snapshot.carrot_axis;
+  // useMemo for the JSX list keeps re-renders cheap when only the
+  // retention numbers change; identity-stable centres array means
+  // React keys match across frames.
+  const meshes = useMemo(() => {
+    const out: JSX.Element[] = [];
+    ingredients.forEach((ing, k) => {
+      out.push(...renderIngredient(ing, k, snapshot));
+    });
+    return out;
+  }, [ingredients, snapshot]);
 
-  // Empty pool (rebuild marker frames carry carrot_count=0): render nothing.
-  if (snapshot.carrot_count === 0 || snapshot.carrot_centres.length === 0) {
-    return null;
-  }
-
-  return (
-    <>
-      {snapshot.carrot_centres.map((centre, idx) => {
-        const { position, rotation } = poseFromAxis(axis, centre, lengthM);
-        return (
-          <group key={idx} position={position} rotation={rotation}>
-            <mesh>
-              <cylinderGeometry
-                args={[diameterM / 2, diameterM / 2, lengthM, 32, 1]}
-              />
-              <meshStandardMaterial color={color} roughness={0.55} />
-            </mesh>
-          </group>
-        );
-      })}
-    </>
-  );
+  if (meshes.length === 0) return null;
+  return <>{meshes}</>;
 }

@@ -39,7 +39,7 @@ def run_dashboard_mod():
 
 @pytest.fixture
 def base_cfg():
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     return cfg
 

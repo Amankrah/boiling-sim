@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 # Wire-format version. MUST stay in lockstep with crates/ws-server/src/snapshot.rs
 # (see the CHANGELOG comment at the top of that file for v1 -> v2 changes).
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION: int = 6
+SCHEMA_VERSION: int = 8
 
 
 # Display names for the Phase-4-validated solutes. Keyed to the
@@ -106,7 +106,11 @@ def _axis_to_int(axis: str) -> int:
 def _carrot_centres(cfg: Any) -> list[list[float]]:
     """Compute carrot instance centres from cfg using the same auto-placement
     routine geometry.py uses to voxelize. Returned as a length-``count`` list
-    of ``[x, y, z]`` lists (msgpack-friendly)."""
+    of ``[x, y, z]`` lists (msgpack-friendly).
+
+    Legacy v6 helper: returns the centres for ``cfg.carrot`` only.
+    Multi-ingredient (v8) callers should use ``_ingredient_states`` instead.
+    """
     from .config import auto_place_carrots
     inner_radius = cfg.pot.diameter_m / 2 - cfg.pot.wall_thickness_m
     water_height = cfg.water.fill_fraction * (
@@ -124,6 +128,65 @@ def _carrot_centres(cfg: Any) -> list[list[float]]:
         water_top_z=water_top_z,
     )
     return [[float(c[0]), float(c[1]), float(c[2])] for c in centres]
+
+
+def _ingredient_states(cfg: Any, sample: Any) -> list[dict[str, Any]]:
+    """Build the v8 per-ingredient state list: pose + name + retention.
+
+    One dict per ingredient (legacy ``cfg.carrot`` at index 0; extras
+    at indices 1..N). Each dict carries:
+      ``name``: human-readable label for the 3D scene's color palette.
+      ``count``: number of instances of this ingredient.
+      ``axis``: 0=x, 1=y, 2=z cylinder orientation.
+      ``diameter_m`` / ``length_m``: per-ingredient dimensions.
+      ``centres``: list of [x, y, z] anchor points.
+      ``total_mass_g``: derived (count·π·(d/2)²·L·ρ_ingredient).
+      ``retention``: aggregate retention % for this ingredient (sample
+        provides ``retention_per_ingredient[k]`` if multi-ingredient,
+        otherwise the ingredient-0 aggregate ``sample.retention_pct``).
+      ``retention2``: same for the secondary solute.
+    """
+    from .config import auto_place_carrots
+    inner_radius = cfg.pot.diameter_m / 2 - cfg.pot.wall_thickness_m
+    water_height = cfg.water.fill_fraction * (
+        cfg.pot.height_m - cfg.pot.base_thickness_m
+    )
+    water_top_z = cfg.pot.base_thickness_m + water_height
+
+    states: list[dict[str, Any]] = []
+    iter_list = list(cfg.iter_ingredients())
+    n_ing = len(iter_list)
+    for k, (geom, _nut, _nut2) in enumerate(iter_list):
+        centres = auto_place_carrots(
+            count=geom.count,
+            axis=geom.axis,
+            anchor=geom.position,
+            diameter_m=geom.diameter_m,
+            length_m=geom.length_m,
+            inner_radius=inner_radius,
+            base_thickness=cfg.pot.base_thickness_m,
+            water_top_z=water_top_z,
+        )
+        if n_ing > 1 and k < len(sample.retention_per_ingredient):
+            retention = float(sample.retention_per_ingredient[k])
+        else:
+            retention = float(sample.retention_pct)
+        if n_ing > 1 and k < len(sample.retention2_per_ingredient):
+            retention2 = float(sample.retention2_per_ingredient[k])
+        else:
+            retention2 = float(sample.retention2_pct)
+        states.append({
+            "name": str(geom.name),
+            "count": int(geom.count),
+            "axis": _axis_to_int(geom.axis),
+            "diameter_m": float(geom.diameter_m),
+            "length_m": float(geom.length_m),
+            "centres": [[float(c[0]), float(c[1]), float(c[2])] for c in centres],
+            "total_mass_g": float(geom.total_mass_g()),
+            "retention": retention,
+            "retention2": retention2,
+        })
+    return states
 
 
 def _grid_meta(nx: int, ny: int, nz: int, dx: float, origin: tuple[float, float, float]) -> dict[str, Any]:
@@ -283,6 +346,20 @@ def build_snapshot(
         "carrot_length_m": float(cfg.carrot.length_m),
         "carrot_centres": _carrot_centres(cfg),
         "carrot_total_mass_g": float(cfg.carrot.total_mass_g()),
+        # v7: per-instance retention. Empty when count==1 (aggregate
+        # scalar already covers it) or when the corresponding nutrient
+        # is disabled. Length == carrot_count otherwise.
+        "carrot_retention_per_instance": [
+            float(v) for v in sample.retention_per_instance
+        ],
+        "carrot_retention2_per_instance": [
+            float(v) for v in sample.retention2_per_instance
+        ],
+        # v8: full per-ingredient state list. Length == cfg.n_ingredients.
+        # First entry is the legacy carrot (cfg.carrot); extras follow
+        # in declared order. Carries per-ingredient pose + retention so
+        # the 3D scene can render mixed stews with per-ingredient colors.
+        "ingredients": _ingredient_states(cfg, sample),
     }
 
 
@@ -606,5 +683,10 @@ def serialize_rebuild_marker(
         "carrot_length_m": 0.0,
         "carrot_centres": [],
         "carrot_total_mass_g": 0.0,
+        # v7: per-instance retention; empty during rebuild.
+        "carrot_retention_per_instance": [],
+        "carrot_retention2_per_instance": [],
+        # v8: per-ingredient state list; empty during rebuild.
+        "ingredients": [],
     }
     return msgpack.packb(payload, use_bin_type=True)

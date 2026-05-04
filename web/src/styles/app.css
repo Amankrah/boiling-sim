@@ -1613,3 +1613,43 @@ select {
   z-index: 5;
   box-shadow: var(--shadow-2);
 }
+
+/* ----- M7: extras + couplings cards ------------------------------- */
+/* Bordered card wrapping one extra-ingredient row inside the
+   "Extra Ingredients" section. */
+.extra-ingredient-card,
+.coupling-card {
+  grid-column: 1 / -1;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-2);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-3);
+  background: var(--surface-1);
+}
+
+/* Sub-list of nutrients inside an extra-ingredient card. Indented
+   visually with a left border so the nesting is obvious. */
+.extra-ingredient-card__nutrients {
+  margin-top: var(--space-3);
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--border-strong);
+}
+
+/* One nutrient card inside an extra ingredient. Dashed border so it
+   reads as a sub-element relative to the solid-bordered ingredient. */
+.nutrient-card {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-1);
+  padding: var(--space-2) var(--space-3);
+  margin-top: var(--space-2);
+}
+
+/* Free-text inputs inside extras / couplings need the standard form
+   width treatment. Existing .text-input is the right base; this just
+   ensures the card layouts don't squash them. */
+.extra-ingredient-card .text-input,
+.coupling-card .text-input,
+.nutrient-card .text-input {
+  flex: 1;
+  min-width: 120px;
+}

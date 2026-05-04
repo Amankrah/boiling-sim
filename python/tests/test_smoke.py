@@ -62,7 +62,7 @@ def test_materials_json_valid():
 def test_default_config_loads():
     """Default scenario YAML loads with Pydantic validation."""
     import yaml
-    path = ROOT / "configs" / "scenarios" / "default.yaml"
+    path = ROOT / "configs" / "scenarios" / "single_carrot.yaml"
     assert path.exists()
     cfg = yaml.safe_load(path.read_text())
     assert cfg["pot"]["material"] == "steel_304"

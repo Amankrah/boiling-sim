@@ -62,6 +62,19 @@ fn fixture(step: u64) -> Snapshot {
         carrot_length_m: 0.05,
         carrot_centres: vec![[0.0, 0.0, 0.03]],
         carrot_total_mass_g: 25.5,
+        carrot_retention_per_instance: vec![],
+        carrot_retention2_per_instance: vec![],
+        ingredients: vec![ws_server::snapshot::IngredientState {
+            name: "carrot".into(),
+            count: 1,
+            axis: 2,
+            diameter_m: 0.025,
+            length_m: 0.05,
+            centres: vec![[0.0, 0.0, 0.03]],
+            total_mass_g: 25.5,
+            retention: 99.0,
+            retention2: 100.0,
+        }],
     }
 }
 

@@ -120,74 +120,103 @@ def init_water_volume_fraction(
 
 
 @wp.kernel
-def populate_material_ids(
+def populate_base_materials(
     mat: wp.array3d(dtype=int),
+    instance_id: wp.array3d(dtype=int),
+    ingredient_id: wp.array3d(dtype=int),
     pot_sdf: wp.array3d(dtype=float),
     water_alpha: wp.array3d(dtype=float),
-    origin: wp.vec3,
-    dx: float,
-    carrot_centres: wp.array(dtype=wp.vec3),
-    carrot_count: int,
-    carrot_axis: int,    # 0=x, 1=y, 2=z
-    carrot_radius: float,
-    carrot_length: float,
     mat_fluid: int,
     mat_pot_wall: int,
     mat_air: int,
-    mat_carrot: int,
 ):
-    """Stamp each cell with a material ID.
+    """First voxelization pass: pot wall, water, air. Ingredients are
+    laid down by ``overlay_ingredient_voxels`` afterwards.
 
-    Precedence (highest first): pot wall → carrot → water → air.
-
-    Multi-carrot: ``carrot_centres`` is a length-``carrot_count`` array
-    of vec3 anchor points. For ``carrot_axis == 2`` (legacy z), the
-    anchor is the *base* of the cylinder (extends +length along +z);
-    for axis 0/1 (horizontal x or y), the anchor is the *centre* and
-    the cylinder extends ±length/2 along that axis.
+    Splitting into two passes lets multi-ingredient (M4) overlay each
+    ingredient sequentially without needing a single mega-kernel that
+    knows about every ingredient's flat-array offsets. ``mat`` and
+    ``instance_id``/``ingredient_id`` are zeroed for every cell here so
+    overlay passes can use ``mat == mat_fluid`` as a "free for an
+    ingredient to claim" gate.
     """
     i, j, k = wp.tid()
-    p = origin + wp.vec3(float(i) + 0.5, float(j) + 0.5, float(k) + 0.5) * dx
-
-    # Pot wall wins if we're in solid pot material.
+    instance_id[i, j, k] = 0
+    ingredient_id[i, j, k] = 0
     if pot_sdf[i, j, k] < 0.0:
         mat[i, j, k] = mat_pot_wall
         return
-
-    # Carrot test against each instance. count is small (<=64) and the
-    # cell is exited early on the first hit, so this stays cheap.
-    half_len = carrot_length * float(0.5)
-    for c in range(carrot_count):
-        rel = p - carrot_centres[c]
-        if carrot_axis == 0:
-            # Horizontal along +x: anchor is centre, axial range ±L/2.
-            r_perp = wp.sqrt(rel[1] * rel[1] + rel[2] * rel[2])
-            along = rel[0]
-            if r_perp < carrot_radius and along > -half_len and along < half_len:
-                mat[i, j, k] = mat_carrot
-                return
-        elif carrot_axis == 1:
-            # Horizontal along +y.
-            r_perp = wp.sqrt(rel[0] * rel[0] + rel[2] * rel[2])
-            along = rel[1]
-            if r_perp < carrot_radius and along > -half_len and along < half_len:
-                mat[i, j, k] = mat_carrot
-                return
-        else:
-            # Vertical (legacy): anchor is the base, axial range [0, L].
-            r_perp = wp.sqrt(rel[0] * rel[0] + rel[1] * rel[1])
-            along = rel[2]
-            if r_perp < carrot_radius and along > float(0.0) and along < carrot_length:
-                mat[i, j, k] = mat_carrot
-                return
-
-    # Water (liquid phase).
     if water_alpha[i, j, k] > 0.5:
         mat[i, j, k] = mat_fluid
-        return
+    else:
+        mat[i, j, k] = mat_air
 
-    # Everything else is air (padding, above water line, etc.).
-    mat[i, j, k] = mat_air
+
+@wp.kernel
+def overlay_ingredient_voxels(
+    mat: wp.array3d(dtype=int),
+    instance_id: wp.array3d(dtype=int),
+    ingredient_id: wp.array3d(dtype=int),
+    origin: wp.vec3,
+    dx: float,
+    centres: wp.array(dtype=wp.vec3),
+    count: int,
+    axis: int,            # 0=x, 1=y, 2=z
+    radius: float,
+    length: float,
+    this_ingredient_id: int,   # k+1, written into ingredient_id on hit
+    mat_fluid: int,
+    mat_carrot: int,
+):
+    """Stamp this ingredient's instances onto the grid.
+
+    Run once per ingredient AFTER ``populate_base_materials`` has set
+    pot/fluid/air baselines. Only fluid cells are eligible — pot-wall
+    cells stay pot wall, and previous ingredients keep their cells
+    (``mat`` already == ``mat_carrot`` from an earlier overlay).
+
+    On hit: writes ``mat_carrot`` to ``mat``, ``c+1`` to
+    ``instance_id`` (within this ingredient), and
+    ``this_ingredient_id`` to ``ingredient_id``. The latter is the
+    1-based global ingredient index (ingredient 0 → 1, extras 0 → 2,
+    etc.) used by per-ingredient diagnostic reductions.
+
+    For ``axis == 2`` (legacy z), ``centres[c]`` is the cylinder *base*
+    (range ``[cz, cz+length]``); for axis 0/1, it's the *centre*
+    (range ``±length/2``).
+    """
+    i, j, k = wp.tid()
+    # Skip cells already claimed by pot wall, air, or an earlier ingredient.
+    if mat[i, j, k] != mat_fluid:
+        return
+    p = origin + wp.vec3(float(i) + 0.5, float(j) + 0.5, float(k) + 0.5) * dx
+    half_len = length * float(0.5)
+    for c in range(count):
+        rel = p - centres[c]
+        if axis == 0:
+            r_perp = wp.sqrt(rel[1] * rel[1] + rel[2] * rel[2])
+            along = rel[0]
+            if r_perp < radius and along > -half_len and along < half_len:
+                mat[i, j, k] = mat_carrot
+                instance_id[i, j, k] = c + 1
+                ingredient_id[i, j, k] = this_ingredient_id
+                return
+        elif axis == 1:
+            r_perp = wp.sqrt(rel[0] * rel[0] + rel[2] * rel[2])
+            along = rel[1]
+            if r_perp < radius and along > -half_len and along < half_len:
+                mat[i, j, k] = mat_carrot
+                instance_id[i, j, k] = c + 1
+                ingredient_id[i, j, k] = this_ingredient_id
+                return
+        else:
+            r_perp = wp.sqrt(rel[0] * rel[0] + rel[1] * rel[1])
+            along = rel[2]
+            if r_perp < radius and along > float(0.0) and along < length:
+                mat[i, j, k] = mat_carrot
+                instance_id[i, j, k] = c + 1
+                ingredient_id[i, j, k] = this_ingredient_id
+                return
 
 
 @wp.kernel
@@ -250,6 +279,20 @@ class Grid:
     ux: wp.array
     uy: wp.array
     uz: wp.array
+    # Phase 8 M3: per-cell carrot-instance label. ``0`` for non-carrot
+    # cells; ``c+1`` for the carrot index that voxelized first. The
+    # ``+1`` sentinel keeps a single int field doing both jobs without
+    # a separate "is a carrot" bit. Reductions over ``instance_id == c+1``
+    # give per-instance retention diagnostics. **M4**: instance_id is now
+    # *per-ingredient* (1..count within whichever ingredient claimed the
+    # cell); pair with ``ingredient_id`` to disambiguate "carrot 0" vs
+    # "potato 0".
+    instance_id: wp.array = None
+    # Phase 8 M4: per-cell ingredient label. ``0`` for non-ingredient
+    # cells; ``k+1`` for the ingredient that claimed the cell, where
+    # ``k`` is the index in ``cfg.iter_ingredients()``. Ingredient 0 is
+    # the legacy ``cfg.carrot``; 1..N are ``cfg.extra_ingredients``.
+    ingredient_id: wp.array = None
     bubbles: Any = None  # BubblePool | None — typed Any to avoid circular import
     # Phase-3 Milestone D: baseline water α (without bubbles). Evolving
     # ``water_alpha`` is reset from this each bubble step, then reduced by
@@ -314,6 +357,13 @@ def build_pot_geometry(cfg: ScenarioConfig, device: str = "cuda:0") -> Grid:
     T = wp.zeros((nx, ny, nz), dtype=float, device=device)
     p = wp.zeros((nx, ny, nz), dtype=float, device=device)
     mat = wp.zeros((nx, ny, nz), dtype=int, device=device)
+    # M3 instance_id: 0 outside carrots; c+1 for cells assigned to
+    # carrot index c (within whichever ingredient claimed the cell).
+    instance_id = wp.zeros((nx, ny, nz), dtype=int, device=device)
+    # M4 ingredient_id: 0 outside ingredients; k+1 for the ingredient
+    # that claimed the cell. ``cfg.iter_ingredients()[k]`` is the
+    # corresponding (geometry, nutrient, nutrient2) tuple.
+    ingredient_id_arr = wp.zeros((nx, ny, nz), dtype=int, device=device)
 
     # MAC face velocities
     ux = wp.zeros((nx + 1, ny, nz), dtype=float, device=device)
@@ -329,26 +379,34 @@ def build_pot_geometry(cfg: ScenarioConfig, device: str = "cuda:0") -> Grid:
     water_height = cfg.water.fill_fraction * h_inner
     water_line_z = base_thickness + water_height
 
-    # Auto-place N carrots from the config (count + axis + anchor).
-    # count==1 returns [position] unchanged so legacy single-carrot
-    # scenarios voxelize identically.
+    # M4: per-ingredient auto-placement. Build a parallel list of
+    # (centres_array, count, axis_int, radius, length) tuples, one per
+    # ingredient. Ingredient 0 is the legacy ``cfg.carrot``; 1..N come
+    # from ``cfg.extra_ingredients``. ``cfg.iter_ingredients()``
+    # provides the canonical iteration order.
     from .config import auto_place_carrots
-    centres = auto_place_carrots(
-        count=cfg.carrot.count,
-        axis=cfg.carrot.axis,
-        anchor=cfg.carrot.position,
-        diameter_m=cfg.carrot.diameter_m,
-        length_m=cfg.carrot.length_m,
-        inner_radius=r_inner,
-        base_thickness=base_thickness,
-        water_top_z=water_line_z,
-    )
-    carrot_centres_np = np.array(centres, dtype=np.float32)
-    carrot_centres = wp.array(carrot_centres_np, dtype=wp.vec3, device=device)
-    carrot_count_int = len(centres)
-    carrot_axis_int = {"x": 0, "y": 1, "z": 2}[cfg.carrot.axis]
-    carrot_radius = cfg.carrot.diameter_m / 2
-    carrot_length = cfg.carrot.length_m
+    axis_to_int = {"x": 0, "y": 1, "z": 2}
+    ingredient_specs = []  # list of (centres_wp, count, axis_int, r, L)
+    for ing_idx, (geom, _nut, _nut2) in enumerate(cfg.iter_ingredients()):
+        centres = auto_place_carrots(
+            count=geom.count,
+            axis=geom.axis,
+            anchor=geom.position,
+            diameter_m=geom.diameter_m,
+            length_m=geom.length_m,
+            inner_radius=r_inner,
+            base_thickness=base_thickness,
+            water_top_z=water_line_z,
+        )
+        centres_np = np.array(centres, dtype=np.float32)
+        centres_wp = wp.array(centres_np, dtype=wp.vec3, device=device)
+        ingredient_specs.append((
+            centres_wp,
+            len(centres),
+            axis_to_int[geom.axis],
+            geom.diameter_m / 2.0,
+            geom.length_m,
+        ))
 
     # ---- Kernels ----
     wp.launch(
@@ -379,27 +437,51 @@ def build_pot_geometry(cfg: ScenarioConfig, device: str = "cuda:0") -> Grid:
         ],
         device=device,
     )
+    # M4 voxelization (two-pass):
+    #   1. Base pass: pot wall, water, air. Zeros instance_id and
+    #      ingredient_id for every cell so the overlay pass can use
+    #      ``mat == MAT_FLUID`` as a "free to claim" gate.
+    #   2. Overlay pass: one launch per ingredient, in declaration order.
+    #      Each overlay only touches MAT_FLUID cells inside its cylinders,
+    #      stamping mat=MAT_CARROT plus instance_id and ingredient_id.
+    #      Earlier ingredients win overlaps (later overlays skip cells
+    #      that already have mat == MAT_CARROT).
     wp.launch(
-        populate_material_ids,
+        populate_base_materials,
         dim=(nx, ny, nz),
         inputs=[
             mat,
+            instance_id,
+            ingredient_id_arr,
             pot_sdf,
             water_alpha,
-            wp.vec3(*origin),
-            dx,
-            carrot_centres,
-            carrot_count_int,
-            carrot_axis_int,
-            carrot_radius,
-            carrot_length,
             MAT_FLUID,
             MAT_POT_WALL,
             MAT_AIR,
-            MAT_CARROT,
         ],
         device=device,
     )
+    for ing_idx, (centres_wp, c_count, c_axis, c_r, c_L) in enumerate(ingredient_specs):
+        wp.launch(
+            overlay_ingredient_voxels,
+            dim=(nx, ny, nz),
+            inputs=[
+                mat,
+                instance_id,
+                ingredient_id_arr,
+                wp.vec3(*origin),
+                dx,
+                centres_wp,
+                c_count,
+                c_axis,
+                c_r,
+                c_L,
+                ing_idx + 1,    # this_ingredient_id (1-based)
+                MAT_FLUID,
+                MAT_CARROT,
+            ],
+            device=device,
+        )
     wp.launch(
         initialize_temperature,
         dim=(nx, ny, nz),
@@ -424,6 +506,8 @@ def build_pot_geometry(cfg: ScenarioConfig, device: str = "cuda:0") -> Grid:
         pot_sdf=pot_sdf, water_alpha=water_alpha,
         T=T, p=p, mat=mat,
         ux=ux, uy=uy, uz=uz,
+        instance_id=instance_id,
+        ingredient_id=ingredient_id_arr,
     )
 
     # Phase 3 optional: allocate bubble pool + α baseline if boiling is enabled.
@@ -601,10 +685,18 @@ def export_scene_usd(
     path: str | pathlib.Path,
     pot_mesh: TriMesh,
     water_mesh: TriMesh,
-    carrot_points: np.ndarray,
+    carrot_points_per_instance: list[np.ndarray],
     carrot_surface_tris: np.ndarray,
 ) -> None:
-    """Write pot, water, and carrot meshes to a USD stage (z-up, meters)."""
+    """Write pot, water, and carrot meshes to a USD stage (z-up, meters).
+
+    Multi-carrot: every entry in ``carrot_points_per_instance`` is a
+    translated copy of the same canonical mesh. We emit one prim per
+    instance (``/World/Carrot_0``, ``/World/Carrot_1``, ...) under a
+    shared ``/World/Carrots`` group prim so DCC tools can select all
+    carrots together. Topology (``carrot_surface_tris``) is shared
+    across instances, matching how the rasterizer treats them.
+    """
     from pxr import Usd, UsdGeom
 
     path = pathlib.Path(path)
@@ -612,15 +704,17 @@ def export_scene_usd(
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
     UsdGeom.SetStageMetersPerUnit(stage, 1.0)
 
-    def _add(name: str, points: np.ndarray, faces: np.ndarray) -> None:
-        prim = UsdGeom.Mesh.Define(stage, f"/World/{name}")
+    def _add(prim_path: str, points: np.ndarray, faces: np.ndarray) -> None:
+        prim = UsdGeom.Mesh.Define(stage, prim_path)
         prim.CreatePointsAttr([tuple(map(float, p)) for p in points])
         prim.CreateFaceVertexIndicesAttr(faces.flatten().tolist())
         prim.CreateFaceVertexCountsAttr([3] * len(faces))
 
-    _add("Pot", pot_mesh.points, pot_mesh.faces)
-    _add("Water", water_mesh.points, water_mesh.faces)
-    _add("Carrot", carrot_points, carrot_surface_tris)
+    _add("/World/Pot", pot_mesh.points, pot_mesh.faces)
+    _add("/World/Water", water_mesh.points, water_mesh.faces)
+    UsdGeom.Xform.Define(stage, "/World/Carrots")
+    for idx, pts in enumerate(carrot_points_per_instance):
+        _add(f"/World/Carrots/Carrot_{idx}", pts, carrot_surface_tris)
 
     stage.GetRootLayer().Save()
 

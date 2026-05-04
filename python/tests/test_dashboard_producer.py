@@ -31,7 +31,7 @@ def sim_dual() -> Simulation:
     non-trivially populated (non-zero bubble count, retention starting
     to move off 100 %).
     """
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.nutrient2 = cfg.nutrient.model_copy(update={"enabled": True})
     cfg.boiling.enabled = True
@@ -74,6 +74,11 @@ def test_snapshot_has_all_schema_fields(sim_dual):
         "carrot_count", "carrot_axis",
         "carrot_diameter_m", "carrot_length_m",
         "carrot_centres", "carrot_total_mass_g",
+        # v7 additions: per-instance retention
+        "carrot_retention_per_instance",
+        "carrot_retention2_per_instance",
+        # v8 additions: multi-ingredient
+        "ingredients",
     }
     assert set(snap.keys()) == expected_fields, (
         f"missing/extra keys: "

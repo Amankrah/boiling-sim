@@ -12,7 +12,7 @@ import contextlib
 import os
 import pathlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import warp as wp
@@ -88,6 +88,33 @@ class ScalarSample:
     leached2_pct: float = 0.0
     degraded2_pct: float = 0.0
     precipitated2_pct: float = 0.0
+    # M3 per-instance retention diagnostics. Empty when nutrient is
+    # disabled or carrot.count==1 (no point in a length-1 vector when
+    # the aggregate scalar already covers it). Length == cfg.carrot.count
+    # otherwise; entry i is the percent of carrot[i]'s initial mass
+    # still inside its voxel mask. Per-instance leached/degraded/
+    # precipitated are deferred -- they require attribution physics
+    # (tracking which carrot a dissolved molecule came from), and the
+    # aggregate scalars above already characterise the mass-balance
+    # picture across all instances. Per-instance *retention* is the
+    # diagnostic users actually want for "is the carrot near the wall
+    # cooked through?".
+    retention_per_instance: list[float] = field(default_factory=list)
+    retention2_per_instance: list[float] = field(default_factory=list)
+    # M4 per-ingredient retention. One entry per ingredient (cfg.carrot
+    # at index 0; cfg.extra_ingredients[k-1] at index k). Length =
+    # cfg.n_ingredients when populated; empty when nutrient is disabled
+    # or only one ingredient is present (the aggregate scalars cover
+    # the legacy single-ingredient case). Same shared-nutrient-profile
+    # caveat as the per-instance vector: every ingredient leaches into
+    # the same C/C_water field today; per-ingredient nutrient kinetics
+    # is a future M4-extended.
+    retention_per_ingredient: list[float] = field(default_factory=list)
+    retention2_per_ingredient: list[float] = field(default_factory=list)
+    # M4 ingredient names (parallel to retention_per_ingredient). Used by
+    # the dashboard to label per-ingredient lines / 3D colors. Length =
+    # cfg.n_ingredients when populated.
+    ingredient_names: list[str] = field(default_factory=list)
 
 
 class Simulation:
@@ -109,6 +136,13 @@ class Simulation:
         self.ws_nutrient = None
         self.primary_slot = None
         self.secondary_slot = None
+        # M4-extended: each extra ingredient with an enabled nutrient
+        # gets its own SoluteSlot. ``self.extra_slots`` is a list of
+        # per-ingredient slot lists: ``self.extra_slots[k]`` is the
+        # list of SoluteSlot for ``cfg.extra_ingredients[k]`` in slot
+        # order (primary, secondary if enabled, then ``extra_nutrients``
+        # in declared order). M8: variable-length, not capped at 2.
+        self.extra_slots: list[list[Any]] = []
         if cfg.nutrient.enabled and self.grid.C is not None:
             from .nutrient import (
                 allocate_nutrient_workspace,
@@ -127,6 +161,76 @@ class Simulation:
                     self.grid, cfg, self.ws_nutrient,
                 )
 
+        # M4-extended: allocate per-extra-ingredient solute slots. Each
+        # extra with ``nutrient.enabled`` gets its own C / C_water /
+        # workspace / precipitated_mass arrays, with kernels gated on
+        # ``ingredient_id == k+1`` so they only modify their own
+        # ingredient's voxels and dump dissolved mass into their own
+        # water field.
+        if (
+            self.grid.ingredient_id is not None
+            and len(cfg.extra_ingredients) > 0
+        ):
+            from .nutrient import _allocate_ingredient_slot
+            for ext_idx, extra in enumerate(cfg.extra_ingredients):
+                ingredient_idx = ext_idx + 1   # 0 is legacy carrot
+                slots = _allocate_ingredient_slot(
+                    self.grid, cfg, extra, ingredient_idx, device=device,
+                )
+                self.extra_slots.append(slots)
+
+        # M5: resolve nutrient-nutrient coupling specs into pairs of
+        # actual SoluteSlot references. Each entry is (coupling_cfg,
+        # protector_slot, protected_slot).
+        #
+        # Resolution rules:
+        #   * Coupling with ``enabled: false`` -- silently skipped.
+        #   * Coupling with a typo in the *ingredient* name -- HARD ERROR.
+        #     Catches misspellings like ``carrott.vitamin_c``; never the
+        #     fault of a disabled nutrient since the ingredient itself is
+        #     declared in cfg.
+        #   * Coupling whose ingredient exists but whose slot is empty
+        #     (the named nutrient has ``enabled: false``) -- silently
+        #     skipped. This lets the dashboard's default.yaml ship a
+        #     coupling block alongside disabled nutrients without
+        #     crashing; users opt into the coupling by enabling both
+        #     nutrients on the participating ingredients.
+        self._resolved_couplings: list[tuple[Any, Any, Any]] = []
+        for cc in cfg.nutrient_couplings:
+            if not cc.enabled:
+                continue
+            # First check: does the named ingredient exist at all?
+            ingredient_names = {self.cfg.carrot.name} | {
+                e.name for e in self.cfg.extra_ingredients
+            }
+            for kind, ing in (
+                ("protector", cc.protector_ingredient),
+                ("protected", cc.protected_ingredient),
+            ):
+                if ing not in ingredient_names:
+                    raise ValueError(
+                        f"nutrient_coupling {kind} references unknown "
+                        f"ingredient {ing!r}; declared ingredients are "
+                        f"{sorted(ingredient_names)}"
+                    )
+            # M8: when the coupling carries an explicit nutrient name
+            # (3rd+ slot on an extra ingredient), the resolver matches
+            # by name; otherwise it falls back to the primary/secondary
+            # literal.
+            protector = self._resolve_slot(
+                cc.protector_ingredient, cc.protector_slot,
+                nutrient_name=cc.protector_nutrient_name,
+            )
+            protected = self._resolve_slot(
+                cc.protected_ingredient, cc.protected_slot,
+                nutrient_name=cc.protected_nutrient_name,
+            )
+            if protector is None or protected is None:
+                # Targets exist as ingredients but their nutrients are
+                # disabled -- skip this coupling, no harm done.
+                continue
+            self._resolved_couplings.append((cc, protector, protected))
+
         # Water-specific constants (Phase 2 uses constant properties).
         self.rho_water = float(self.props.rho[MAT_FLUID])
         self.beta_water = 2.07e-4  # 1/K near 25 °C (water)
@@ -138,6 +242,53 @@ class Simulation:
         self._wall_mask = self._mat_host == MAT_POT_WALL
         self._carrot_mask = self._mat_host == MAT_CARROT
         self._n_carrot = int(self._carrot_mask.sum())
+        # M3: per-instance carrot masks for retention diagnostics.
+        # ``self._instance_id_host`` mirrors ``grid.instance_id`` on host
+        # (cells outside carrots are 0; carrot cells carry c+1 within
+        # whichever ingredient claimed the cell -- M4 makes instance_id
+        # per-ingredient, not global).
+        # M4: ``self._ingredient_id_host`` carries the 1-based ingredient
+        # label (0 outside, k+1 for ingredient k). Combined as
+        # ``(ingredient_id == k+1) & (instance_id == c+1)`` to disambiguate
+        # "carrot 0 instance 0" from "potato 0 instance 0".
+        if self.grid.instance_id is not None:
+            self._instance_id_host = self.grid.instance_id.numpy()
+        else:
+            self._instance_id_host = None
+        if self.grid.ingredient_id is not None:
+            self._ingredient_id_host = self.grid.ingredient_id.numpy()
+        else:
+            self._ingredient_id_host = None
+
+        # M4: per-ingredient masks. ``_per_ingredient_masks[k]`` is the
+        # boolean voxel mask for ingredient k as a whole (all instances
+        # combined). Length == cfg.n_ingredients. Used by per-ingredient
+        # retention reductions in sample_scalars.
+        self._per_ingredient_masks: list[np.ndarray] = []
+        self._n_per_ingredient: list[int] = []
+        if self._ingredient_id_host is not None:
+            for k in range(cfg.n_ingredients):
+                m = self._ingredient_id_host == (k + 1)
+                self._per_ingredient_masks.append(m)
+                self._n_per_ingredient.append(int(m.sum()))
+
+        # M3: per-instance masks for ingredient 0 ONLY (legacy carrot).
+        # Multi-ingredient scenarios get per-ingredient retention from
+        # ``_per_ingredient_masks`` instead. Per-(ingredient, instance)
+        # diagnostics are deferred -- the count×n_ingredients matrix
+        # explodes wire-format size and "is this carrot cooked?" is
+        # already answered by per-ingredient totals at typical count<=8.
+        if self._instance_id_host is not None and self._ingredient_id_host is not None:
+            ing0_mask = self._ingredient_id_host == 1
+            n_carrots = int(cfg.carrot.count)
+            self._instance_masks = [
+                ing0_mask & (self._instance_id_host == (c + 1))
+                for c in range(n_carrots)
+            ]
+            self._n_per_instance = [int(m.sum()) for m in self._instance_masks]
+        else:
+            self._instance_masks = []
+            self._n_per_instance = []
         # Inner-wall (fluid-contact-face) mask: pot-wall cells whose +z neighbor
         # is fluid. This is the Rohsenow-relevant boiling surface. For low-k
         # pot materials the heater face is several K hotter than this face due
@@ -268,6 +419,98 @@ class Simulation:
                     self.grid.dx, self.cfg.nutrient2.D_eff_m2_per_s))
         return self.cfg.solver.cfl_safety_factor * dt
 
+    def _resolve_slot(
+        self,
+        ingredient_name: str,
+        slot_name: str,
+        nutrient_name: str = "",
+    ) -> Any:
+        """Look up a SoluteSlot by ingredient name + slot identity.
+
+        ``nutrient_name`` (M8) takes precedence over ``slot_name`` when
+        non-empty: the resolver searches the ingredient's slot list
+        for one whose ``cfg_nutrient.name`` matches. This handles
+        couplings that target a 3rd+ nutrient on an extra ingredient
+        (beyond the legacy primary/secondary pair). When empty, falls
+        back to the literal ``slot_name`` ("primary"/"secondary").
+
+        Returns ``None`` if the slot doesn't exist (nutrient disabled,
+        name typo, etc.); the caller decides whether to error or skip.
+        """
+        # Ingredient 0 (legacy carrot) lives on (primary_slot, secondary_slot).
+        if ingredient_name == self.cfg.carrot.name:
+            if nutrient_name:
+                # Match by nutrient name on the legacy carrot's two slots.
+                if (self.primary_slot is not None
+                        and self.primary_slot.cfg_nutrient.name == nutrient_name):
+                    return self.primary_slot
+                if (self.secondary_slot is not None
+                        and self.secondary_slot.cfg_nutrient.name == nutrient_name):
+                    return self.secondary_slot
+                return None
+            if slot_name == "primary":
+                return self.primary_slot
+            return self.secondary_slot
+        # Extras: search by name.
+        for ext_idx, extra in enumerate(self.cfg.extra_ingredients):
+            if extra.name != ingredient_name:
+                continue
+            slots = self.extra_slots[ext_idx]
+            if nutrient_name:
+                for s in slots:
+                    if s.cfg_nutrient.name == nutrient_name:
+                        return s
+                return None
+            # Slot literal -> index in the slot list. Slot 0 is "primary",
+            # slot 1 is "secondary"; couplings with M8-style nutrient_name
+            # don't reach this branch.
+            idx = 0 if slot_name == "primary" else 1
+            if idx < len(slots):
+                return slots[idx]
+            return None
+        return None
+
+    def _apply_couplings(self) -> None:
+        """M5: refresh ``slot.rate_multiplier`` for every protected slot
+        from the current state of its protectors' water-side
+        concentrations.
+
+        Called once at the top of ``step()`` before the reaction-
+        diffusion-leach kernels. Multiple couplings on the same
+        protected slot multiply (independent scavengers); a single
+        coupling factor is bounded below by ``1 - eta_max``.
+        """
+        # Reset every slot's multiplier so a coupling that *was* active
+        # last step but is disabled this step doesn't carry stale state.
+        all_slots: list[Any] = [self.primary_slot, self.secondary_slot]
+        for slots_for_extra in self.extra_slots:
+            all_slots.extend(slots_for_extra)
+        for s in all_slots:
+            if s is not None:
+                s.rate_multiplier = 1.0
+        if not self._resolved_couplings:
+            return
+        # Compute mean water-side protector concentrations once per
+        # protector slot (the same protector may apply to multiple
+        # protected slots).
+        protector_means: dict[int, float] = {}
+        for _cc, protector, _protected in self._resolved_couplings:
+            key = id(protector)
+            if key in protector_means:
+                continue
+            if protector.C_water is None or not self._water_mask.any():
+                protector_means[key] = 0.0
+                continue
+            cw = protector.C_water.numpy()
+            protector_means[key] = float(cw[self._water_mask].mean())
+        # Apply each coupling. Multiplicative composition lets two
+        # couplings on the same protected slot stack (e.g. AA + tocopherol).
+        for cc, protector, protected in self._resolved_couplings:
+            c_mean = protector_means[id(protector)]
+            factor = 1.0 - cc.eta * (c_mean / cc.c_ref_mg_per_kg)
+            factor = max(factor, 1.0 - cc.eta_max)
+            protected.rate_multiplier *= factor
+
     def step(self, dt: float | None = None) -> float:
         """Advance the simulation by one step. Returns the dt used."""
         if dt is None:
@@ -326,6 +569,11 @@ class Simulation:
             )
             from .nutrient import _step_reaction_diffusion_leach
             D_carrot = self.cfg.carrot.diameter_m
+            # M5: refresh per-slot rate_multiplier from the current
+            # water-side protector concentrations BEFORE launching the
+            # degrade kernels. No-op when cfg.nutrient_couplings is empty.
+            with self._profile_phase("nutrient_couplings"):
+                self._apply_couplings()
             with self._profile_phase("nutrient_react_diff_leach"):
                 _step_reaction_diffusion_leach(
                     self.primary_slot, self.grid, D_carrot, dt, device=self.device,
@@ -334,6 +582,16 @@ class Simulation:
                     _step_reaction_diffusion_leach(
                         self.secondary_slot, self.grid, D_carrot, dt, device=self.device,
                     )
+                # M4-extended + M8: each extra ingredient's slots pump
+                # independently through the standard reaction-diffusion-
+                # leach sequence. Slot count per ingredient is variable
+                # (M8 ``extra_nutrients`` allows >2).
+                for slots_for_extra in self.extra_slots:
+                    for slot in slots_for_extra:
+                        _step_reaction_diffusion_leach(
+                            slot, self.grid, slot.D_carrot, dt,
+                            device=self.device,
+                        )
 
         # 5. No-slip on solid faces before projection.
         with self._profile_phase("no_slip_pre"):
@@ -371,6 +629,10 @@ class Simulation:
                 _step_advect_clamp(self.primary_slot, self.grid, dt, device=self.device)
                 if self.secondary_slot is not None:
                     _step_advect_clamp(self.secondary_slot, self.grid, dt, device=self.device)
+                # M4-extended + M8: every slot on every extra advects + clamps.
+                for slots_for_extra in self.extra_slots:
+                    for slot in slots_for_extra:
+                        _step_advect_clamp(slot, self.grid, dt, device=self.device)
 
         self.t += dt
         self.step_count += 1
@@ -481,6 +743,109 @@ class Simulation:
                 100.0 - retention2_pct - leached2_pct - precipitated2_pct
             )
 
+        # M4 per-ingredient retention. Compute only when there's more
+        # than one ingredient (single-ingredient scenarios are covered
+        # by the aggregate scalars above).
+        # M4-extended: each extra ingredient has its OWN C field via
+        # self.extra_slots; ingredient 0 still reads grid.C. Per-
+        # ingredient C0 comes from each ingredient's own NutrientConfig
+        # so retention is normalised against the right starting mass.
+        retention_per_ingredient: list[float] = []
+        retention2_per_ingredient: list[float] = []
+        ingredient_names: list[str] = []
+        if (
+            self.cfg.n_ingredients > 1
+            and self.grid.C is not None
+            and len(self._per_ingredient_masks) == self.cfg.n_ingredients
+        ):
+            for k, (mask, n_cells) in enumerate(
+                zip(self._per_ingredient_masks, self._n_per_ingredient, strict=True)
+            ):
+                if k == 0:
+                    ingredient_names.append(self.cfg.carrot.name)
+                    C_np = self.grid.C.numpy()
+                    C0 = self.cfg.nutrient.C0_mg_per_kg
+                    C2_np = self.grid.C2.numpy() if self.grid.C2 is not None else None
+                    C0_2 = self.cfg.nutrient2.C0_mg_per_kg if C2_np is not None else 0.0
+                else:
+                    extra = self.cfg.extra_ingredients[k - 1]
+                    ingredient_names.append(extra.name)
+                    slots_for_extra = self.extra_slots[k - 1]
+                    # M4-extended/M8: slots_for_extra is variable-length.
+                    # Per-ingredient retention diagnostics still report
+                    # only the first two slots (primary + secondary)
+                    # since the wire format's per-ingredient retention
+                    # vector is a 2-tuple. M8 nutrients beyond #2 stay
+                    # invisible at the ingredient-level diagnostic but
+                    # still leach + degrade kernel-side.
+                    primary = slots_for_extra[0] if len(slots_for_extra) >= 1 else None
+                    secondary = slots_for_extra[1] if len(slots_for_extra) >= 2 else None
+                    if primary is None:
+                        # Extra has no enabled nutrient -- fall back to
+                        # the shared cfg.nutrient pool for the diagnostic.
+                        C_np = self.grid.C.numpy()
+                        C0 = self.cfg.nutrient.C0_mg_per_kg
+                    else:
+                        C_np = primary.C.numpy()
+                        C0 = primary.cfg_nutrient.C0_mg_per_kg
+                    if secondary is not None:
+                        C2_np = secondary.C.numpy()
+                        C0_2 = secondary.cfg_nutrient.C0_mg_per_kg
+                    else:
+                        C2_np = None
+                        C0_2 = 0.0
+
+                if n_cells == 0 or C0 <= 0.0:
+                    retention_per_ingredient.append(100.0)
+                else:
+                    ref = C0 * float(n_cells)
+                    retention_per_ingredient.append(
+                        100.0 * float(C_np[mask].sum()) / ref
+                    )
+                if C2_np is not None and C0_2 > 0.0 and n_cells > 0:
+                    ref2 = C0_2 * float(n_cells)
+                    retention2_per_ingredient.append(
+                        100.0 * float(C2_np[mask].sum()) / ref2
+                    )
+
+        # M3: per-instance retention (within ingredient 0 only). Skip
+        # when count==1 (aggregate scalar covers it).
+        retention_per_instance: list[float] = []
+        retention2_per_instance: list[float] = []
+        n_carrots = len(self._instance_masks)
+        if n_carrots > 1 and self.grid.C is not None:
+            C0 = self.cfg.nutrient.C0_mg_per_kg
+            C_np = self.grid.C.numpy()
+            for c, (mask, n_cells) in enumerate(
+                zip(self._instance_masks, self._n_per_instance, strict=True)
+            ):
+                if n_cells == 0:
+                    retention_per_instance.append(100.0)
+                    continue
+                ref = C0 * float(n_cells)
+                if ref > 0.0:
+                    retention_per_instance.append(
+                        100.0 * float(C_np[mask].sum()) / ref
+                    )
+                else:
+                    retention_per_instance.append(100.0)
+            if self.grid.C2 is not None:
+                C0_2 = self.cfg.nutrient2.C0_mg_per_kg
+                C2_np = self.grid.C2.numpy()
+                for mask, n_cells in zip(
+                    self._instance_masks, self._n_per_instance, strict=True
+                ):
+                    if n_cells == 0:
+                        retention2_per_instance.append(100.0)
+                        continue
+                    ref = C0_2 * float(n_cells)
+                    if ref > 0.0:
+                        retention2_per_instance.append(
+                            100.0 * float(C2_np[mask].sum()) / ref
+                        )
+                    else:
+                        retention2_per_instance.append(100.0)
+
         return ScalarSample(
             t=self.t,
             dt=dt_last,
@@ -505,6 +870,11 @@ class Simulation:
             leached2_pct=leached2_pct,
             degraded2_pct=degraded2_pct,
             precipitated2_pct=precipitated2_pct,
+            retention_per_instance=retention_per_instance,
+            retention2_per_instance=retention2_per_instance,
+            retention_per_ingredient=retention_per_ingredient,
+            retention2_per_ingredient=retention2_per_ingredient,
+            ingredient_names=ingredient_names,
         )
 
     # ------------------------------------------------------------------

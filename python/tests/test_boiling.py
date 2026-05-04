@@ -20,7 +20,7 @@ from boilingsim.geometry import MAT_POT_WALL, build_pot_geometry
 
 @pytest.fixture(scope="module")
 def boil_cfg() -> ScenarioConfig:
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 100_000
     cfg.grid.dx_m = 0.002
@@ -127,7 +127,7 @@ def test_nucleation_at_hot_base(boil_cfg):
 def test_nucleation_respects_pool_capacity():
     """Set a ridiculously small pool and an extreme superheat. New bubbles should
     stop being added once the pool is full."""
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 16  # tiny
     cfg.grid.dx_m = 0.002
@@ -223,7 +223,7 @@ def test_mikic_rohsenow_growth_rate_analytic():
     from boilingsim.boiling import seed_test_bubble, step_update_bubbles
     import math
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 16
     cfg.grid.dx_m = 0.002
@@ -278,7 +278,7 @@ def test_bubbles_rise_and_vent():
     """
     from boilingsim.boiling import seed_test_bubble, step_update_bubbles
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 100
     cfg.grid.dx_m = 0.002
@@ -326,7 +326,7 @@ def test_latent_heat_energy_balance():
     import math
     from boilingsim.boiling import seed_test_bubble, step_scatter_latent_heat
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 4
     cfg.grid.dx_m = 0.002
@@ -402,7 +402,7 @@ def test_wall_boiling_flux_cools_superheated_wall():
     )
 
     def run(enable_boiling: bool) -> tuple[float, int]:
-        cfg = load_scenario("configs/scenarios/default.yaml")
+        cfg = load_scenario("configs/scenarios/single_carrot.yaml")
         cfg.boiling.enabled = enable_boiling
         cfg.boiling.max_bubbles = 50_000
         cfg.grid.dx_m = 0.002
@@ -462,7 +462,7 @@ def test_no_sink_when_bubble_just_nucleated():
     """
     from boilingsim.boiling import seed_test_bubble, step_scatter_latent_heat
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 4
     cfg.grid.dx_m = 0.002
@@ -501,7 +501,7 @@ def test_bubble_momentum_creates_upward_velocity():
     from boilingsim.boiling import seed_test_bubble, step_scatter_momentum
     import math
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 4
     cfg.grid.dx_m = 0.002
@@ -546,7 +546,7 @@ def test_water_alpha_reduced_in_bubble_cells():
     from boilingsim.boiling import seed_test_bubble, step_reduce_water_alpha
     import math
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 4
     cfg.grid.dx_m = 0.002
@@ -591,7 +591,7 @@ def test_alpha_resets_from_baseline_each_step():
     """
     from boilingsim.boiling import seed_test_bubble, step_reduce_water_alpha
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 4
     cfg.grid.dx_m = 0.002
@@ -628,7 +628,7 @@ def test_full_bubble_step_no_nan_over_30s():
     """
     from boilingsim.pipeline import Simulation
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.grid.dx_m = 0.002
     cfg.solver.pressure_max_iter = 100
     cfg.boiling.enabled = True
@@ -663,7 +663,7 @@ def test_bubble_deactivates_on_solid():
     update step (material at position != MAT_FLUID)."""
     from boilingsim.boiling import seed_test_bubble, step_update_bubbles
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 4
     cfg.grid.dx_m = 0.002
@@ -704,7 +704,7 @@ def test_bubble_condenses_in_subcooled_fluid():
     """
     from boilingsim.boiling import seed_test_bubble, step_update_bubbles
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 4
     cfg.grid.dx_m = 0.002
@@ -777,7 +777,7 @@ def test_no_condensation_when_fluid_at_saturation():
     """
     from boilingsim.boiling import seed_test_bubble, step_update_bubbles
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 4
     cfg.grid.dx_m = 0.002
@@ -818,7 +818,7 @@ def test_fragmentation_splits_into_two_volume_conserving_daughters():
     )
     import math
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 16
     cfg.boiling.fragmentation_radius_m = 4.0e-3
@@ -870,7 +870,7 @@ def test_fragmentation_pool_full_graceful_degradation():
         seed_test_bubble, step_fragment_bubbles,
     )
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 4   # tiny pool to force exhaustion
     cfg.boiling.fragmentation_radius_m = 4.0e-3
@@ -919,7 +919,7 @@ def test_coalescence_merges_overlapping_bubbles():
     )
     import math
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 16
     cfg.boiling.coalescence_enabled = True
@@ -978,7 +978,7 @@ def test_coalescence_does_not_merge_separated_bubbles():
         seed_test_bubble, step_coalesce_bubbles,
     )
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 16
     cfg.boiling.coalescence_enabled = True
@@ -1010,7 +1010,7 @@ def test_coalescence_disabled_is_noop():
         seed_test_bubble, step_coalesce_bubbles,
     )
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 16
     cfg.boiling.coalescence_enabled = False
@@ -1043,7 +1043,7 @@ def test_compact_active_bubbles_empty_pool():
     arrays without crashing in the short-circuit branch."""
     from boilingsim.boiling import read_active_bubbles
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 64
     cfg.grid.dx_m = 0.002
@@ -1067,7 +1067,7 @@ def test_compact_active_bubbles_sparse_mixed():
     (atomic_add race) so we compare as sets / sorted arrays."""
     from boilingsim.boiling import read_active_bubbles, seed_test_bubble
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.boiling.enabled = True
     cfg.boiling.max_bubbles = 8192
     cfg.grid.dx_m = 0.002

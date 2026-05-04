@@ -94,6 +94,18 @@ describe("TypeScript snapshot decode path", () => {
     expect(raw.pot_wall_thickness_m).toBeLessThan(raw.pot_diameter_m / 2);
     expect(raw.pot_base_thickness_m).toBeGreaterThan(0);
     expect(raw.pot_base_thickness_m).toBeLessThan(raw.pot_height_m);
+
+    // v7: per-instance retention. Default fixture is 3 horizontal
+    // carrots at t=5 steps -- per-instance vector should be populated
+    // (length == carrot_count) and every entry near 100% (negligible
+    // degradation in 5 steps).
+    if (raw.carrot_count > 1) {
+      expect(raw.carrot_retention_per_instance).toHaveLength(raw.carrot_count);
+      for (const r of raw.carrot_retention_per_instance) {
+        expect(r).toBeGreaterThan(99.0);
+        expect(r).toBeLessThanOrEqual(100.5);
+      }
+    }
   });
 
   // NB: fzstd is decompress-only; the inverse (zstd encode) lives on the

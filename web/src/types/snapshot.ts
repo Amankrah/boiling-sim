@@ -27,14 +27,21 @@
 // Uint8Array payload as a Float32Array before the snapshot reaches
 // React state.
 //
-// v6 (this — multi-carrot pose): adds carrot pose / quantity fields
-// so the dashboard can render N cylinders laying flat in the pot
-// (realistic stew) rather than one hardcoded vertical procedural
-// cylinder. carrot_count is the instance count, carrot_axis is the
-// cylinder axis (0=x, 1=y, 2=z), carrot_centres is one anchor per
-// instance, and carrot_total_mass_g is the derived UX quantity for
-// the Config page's live readout.
-export const SCHEMA_VERSION = 6;
+// v6 (superseded): adds carrot pose / quantity fields
+// (carrot_count, carrot_axis, carrot_centres, carrot_total_mass_g).
+//
+// v7 (superseded): adds carrot_retention_per_instance + ..2 so each
+// cylinder colour reflects its own retention.
+//
+// v8 (this — multi-ingredient): adds an ingredients[] list carrying
+// per-ingredient pose (count, axis, diameter, length, centres) +
+// name + retention. First entry is the legacy cfg.carrot; extras
+// follow in declared order. The 3D scene renders each ingredient with
+// a name-driven palette (carrot=orange, potato=cream, onion=yellow).
+// Per-ingredient nutrient kinetics are deferred to a future
+// M4-extended; for now every ingredient leaches into the same
+// shared cfg.nutrient pool.
+export const SCHEMA_VERSION = 8;
 
 export interface GridMeta {
   nx: number;
@@ -106,6 +113,37 @@ export interface Snapshot {
   carrot_centres: [number, number, number][];
   /** Total carrot mass in grams (count·π·(d/2)²·L·ρ_carrot, ρ≈1040). */
   carrot_total_mass_g: number;
+  // --- v7: per-instance retention ---
+  /** Primary-solute retention (%) per carrot instance. Length equals
+   *  carrot_count when populated; empty when nutrient disabled or
+   *  carrot_count==1 (the aggregate carrot_retention scalar covers
+   *  single-carrot runs). The 3D renderer colours each cylinder by
+   *  its own entry. */
+  carrot_retention_per_instance: number[];
+  /** Same as carrot_retention_per_instance for the secondary solute. */
+  carrot_retention2_per_instance: number[];
+  // --- v8: multi-ingredient ---
+  /** Per-ingredient state list. First entry is the legacy carrot;
+   *  extras follow in declared order. Length >= 1. */
+  ingredients: IngredientState[];
+}
+
+/** One ingredient's pose + diagnostic snapshot. v8 wire shape. */
+export interface IngredientState {
+  /** Human-readable label ("carrot", "potato", "onion", ...). Drives
+   *  the 3D scene's color palette. */
+  name: string;
+  count: number;
+  /** Cylinder axis: 0=x, 1=y, 2=z. */
+  axis: number;
+  diameter_m: number;
+  length_m: number;
+  /** Anchor per instance (length == count). For axis=2 (z), each is
+   *  the cylinder base; for axis 0/1, the centre. */
+  centres: [number, number, number][];
+  total_mass_g: number;
+  retention: number;
+  retention2: number;
 }
 
 /**

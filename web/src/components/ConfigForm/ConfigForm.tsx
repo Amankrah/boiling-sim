@@ -18,10 +18,16 @@ import {
   DEFAULT_DRAFT,
   PRESETS,
   draftToScenarioJson,
+  makeBlankCoupling,
+  makeBlankIngredient,
+  makeBlankNutrient,
   nutrientsToSoluteKey,
   soluteKeyToNutrients,
+  type CouplingDraft,
+  type ExtraIngredientDraft,
   type InitialConditionsMode,
   type MaterialName,
+  type NamedNutrientDraft,
   type ScenarioDraft,
   type SoluteKey,
 } from "./types";
@@ -88,6 +94,77 @@ export function ConfigForm({ snapshot, sendCommand, onApplied }: Props) {
     setDraft((d) => ({ ...d, grid: { ...d.grid, ...patch } }));
   const updateSimulation = (patch: Partial<ScenarioDraft["simulation"]>) =>
     setDraft((d) => ({ ...d, simulation: { ...d.simulation, ...patch } }));
+
+  // M7: extras + couplings list helpers. Mutators clone the array so
+  // React's identity-based change detection picks up updates.
+  const addExtra = () =>
+    setDraft((d) => ({
+      ...d,
+      extra_ingredients: [...d.extra_ingredients, makeBlankIngredient()],
+    }));
+  const removeExtra = (idx: number) =>
+    setDraft((d) => ({
+      ...d,
+      extra_ingredients: d.extra_ingredients.filter((_, i) => i !== idx),
+    }));
+  const updateExtra = (
+    idx: number,
+    patch: Partial<ExtraIngredientDraft>,
+  ) =>
+    setDraft((d) => ({
+      ...d,
+      extra_ingredients: d.extra_ingredients.map((e, i) =>
+        i === idx ? { ...e, ...patch } : e,
+      ),
+    }));
+  const addNutrientToExtra = (extraIdx: number) =>
+    setDraft((d) => ({
+      ...d,
+      extra_ingredients: d.extra_ingredients.map((e, i) =>
+        i === extraIdx
+          ? { ...e, nutrients: [...e.nutrients, makeBlankNutrient()] }
+          : e,
+      ),
+    }));
+  const removeNutrientFromExtra = (extraIdx: number, nutIdx: number) =>
+    setDraft((d) => ({
+      ...d,
+      extra_ingredients: d.extra_ingredients.map((e, i) =>
+        i === extraIdx
+          ? { ...e, nutrients: e.nutrients.filter((_, j) => j !== nutIdx) }
+          : e,
+      ),
+    }));
+  const updateNutrientOnExtra = (
+    extraIdx: number,
+    nutIdx: number,
+    patch: Partial<NamedNutrientDraft>,
+  ) =>
+    setDraft((d) => ({
+      ...d,
+      extra_ingredients: d.extra_ingredients.map((e, i) =>
+        i === extraIdx
+          ? {
+              ...e,
+              nutrients: e.nutrients.map((n, j) =>
+                j === nutIdx ? { ...n, ...patch } : n,
+              ),
+            }
+          : e,
+      ),
+    }));
+  const addCoupling = () =>
+    setDraft((d) => ({ ...d, couplings: [...d.couplings, makeBlankCoupling()] }));
+  const removeCoupling = (idx: number) =>
+    setDraft((d) => ({
+      ...d,
+      couplings: d.couplings.filter((_, i) => i !== idx),
+    }));
+  const updateCoupling = (idx: number, patch: Partial<CouplingDraft>) =>
+    setDraft((d) => ({
+      ...d,
+      couplings: d.couplings.map((c, i) => (i === idx ? { ...c, ...patch } : c)),
+    }));
 
   const handleSoluteChange = (key: SoluteKey) => {
     const { nutrient, nutrient2 } = soluteKeyToNutrients(key);
@@ -257,6 +334,38 @@ export function ConfigForm({ snapshot, sendCommand, onApplied }: Props) {
             onChange={(axis) => updateCarrot({ axis })}
           />
         </FieldRow>
+        <FieldRow label="Quantity input">
+          {/* M2: choose how the user expresses size. "dimensions" lets
+              the user set Length directly (legacy); "mass" makes Length
+              read-only and derives it from a target gram amount. */}
+          <Select
+            ariaLabel="quantity input mode"
+            value={draft.carrot.mass_mode}
+            options={[
+              { value: "dimensions", label: "Specify dimensions" },
+              { value: "mass", label: "Specify mass (g)" },
+            ]}
+            onChange={(mode) => {
+              if (mode === "mass") {
+                // Seed target_mass_g from the current derived total so
+                // the switch is non-destructive.
+                const currentMassG =
+                  draft.carrot.count *
+                  Math.PI *
+                  Math.pow(draft.carrot.diameter_m / 2, 2) *
+                  draft.carrot.length_m *
+                  1040 *
+                  1000;
+                updateCarrot({
+                  mass_mode: "mass",
+                  target_mass_g: Math.round(currentMassG * 10) / 10,
+                });
+              } else {
+                updateCarrot({ mass_mode: "dimensions", target_mass_g: null });
+              }
+            }}
+          />
+        </FieldRow>
         <FieldRow label="Diameter">
           <NumberInput
             label="∅"
@@ -269,18 +378,33 @@ export function ConfigForm({ snapshot, sendCommand, onApplied }: Props) {
             onCommit={(mm) => updateCarrot({ diameter_m: mm / 1000 })}
           />
         </FieldRow>
-        <FieldRow label="Length">
-          <NumberInput
-            label="L"
-            ariaLabel="carrot length in millimetres"
-            value={draft.carrot.length_m * 1000}
-            min={10}
-            max={200}
-            step={1}
-            unit="mm"
-            onCommit={(mm) => updateCarrot({ length_m: mm / 1000 })}
-          />
-        </FieldRow>
+        {draft.carrot.mass_mode === "mass" ? (
+          <FieldRow label="Target mass">
+            <NumberInput
+              label="m"
+              ariaLabel="target carrot mass in grams"
+              value={draft.carrot.target_mass_g ?? 0}
+              min={5}
+              max={5000}
+              step={10}
+              unit="g"
+              onCommit={(g) => updateCarrot({ target_mass_g: g })}
+            />
+          </FieldRow>
+        ) : (
+          <FieldRow label="Length">
+            <NumberInput
+              label="L"
+              ariaLabel="carrot length in millimetres"
+              value={draft.carrot.length_m * 1000}
+              min={10}
+              max={200}
+              step={1}
+              unit="mm"
+              onCommit={(mm) => updateCarrot({ length_m: mm / 1000 })}
+            />
+          </FieldRow>
+        )}
         <FieldRow label="Position Z">
           <NumberInput
             label="z"
@@ -297,20 +421,92 @@ export function ConfigForm({ snapshot, sendCommand, onApplied }: Props) {
             }
           />
         </FieldRow>
-        <FieldRow label="Total mass">
-          {/* Derived (count · π · (d/2)² · L · ρ_carrot, ρ ≈ 1040 kg/m³).
-              Displayed live so users know "I'm cooking N grams". */}
+        <FieldRow
+          label={
+            draft.carrot.mass_mode === "mass"
+              ? "Derived length"
+              : "Total mass"
+          }
+        >
+          {/* In dimensions mode this shows derived total mass; in mass
+              mode it shows the derived per-instance length so users see
+              both sides of the round-trip. */}
           <span className="text-secondary" aria-live="polite">
-            {(
-              draft.carrot.count *
-              Math.PI *
-              Math.pow(draft.carrot.diameter_m / 2, 2) *
-              draft.carrot.length_m *
-              1040 *
-              1000
-            ).toFixed(1)}{" "}
-            g
+            {draft.carrot.mass_mode === "mass" ? (
+              <>
+                {(() => {
+                  const targetKg = (draft.carrot.target_mass_g ?? 0) / 1000;
+                  const r = draft.carrot.diameter_m / 2;
+                  const perCarrotKg = targetKg / Math.max(1, draft.carrot.count);
+                  const lengthM = perCarrotKg / 1040 / (Math.PI * r * r);
+                  return (lengthM * 1000).toFixed(1);
+                })()}{" "}
+                mm
+              </>
+            ) : (
+              <>
+                {(
+                  draft.carrot.count *
+                  Math.PI *
+                  Math.pow(draft.carrot.diameter_m / 2, 2) *
+                  draft.carrot.length_m *
+                  1040 *
+                  1000
+                ).toFixed(1)}{" "}
+                g
+              </>
+            )}
           </span>
+        </FieldRow>
+      </Section>
+
+      {/* --- M7: Extra Ingredients --- */}
+      <Section
+        title="Extra Ingredients"
+        subtitle={
+          draft.extra_ingredients.length === 0
+            ? "(none) — add a potato, onion, etc. with its own nutrients"
+            : `${draft.extra_ingredients.length} extra ingredient${draft.extra_ingredients.length === 1 ? "" : "s"}`
+        }
+      >
+        {draft.extra_ingredients.map((extra, idx) => (
+          <ExtraIngredientCard
+            key={`extra-${idx}`}
+            extra={extra}
+            extraIdx={idx}
+            onUpdate={(patch) => updateExtra(idx, patch)}
+            onRemove={() => removeExtra(idx)}
+            onAddNutrient={() => addNutrientToExtra(idx)}
+            onRemoveNutrient={(nutIdx) => removeNutrientFromExtra(idx, nutIdx)}
+            onUpdateNutrient={(nutIdx, patch) =>
+              updateNutrientOnExtra(idx, nutIdx, patch)
+            }
+          />
+        ))}
+        <FieldRow label="Add">
+          <Button onClick={addExtra}>+ Add ingredient</Button>
+        </FieldRow>
+      </Section>
+
+      {/* --- M7: Nutrient-Nutrient Couplings --- */}
+      <Section
+        title="Couplings"
+        subtitle={
+          draft.couplings.length === 0
+            ? "(none) — e.g. vitamin C protects β-carotene"
+            : `${draft.couplings.length} active coupling${draft.couplings.length === 1 ? "" : "s"}`
+        }
+      >
+        {draft.couplings.map((coupling, idx) => (
+          <CouplingCard
+            key={`coupling-${idx}`}
+            coupling={coupling}
+            onUpdate={(patch) => updateCoupling(idx, patch)}
+            onRemove={() => removeCoupling(idx)}
+          />
+        ))}
+        <FieldRow label="Add">
+          <Button onClick={addCoupling}>+ Add coupling</Button>
         </FieldRow>
       </Section>
 
@@ -518,6 +714,296 @@ export function ConfigForm({ snapshot, sendCommand, onApplied }: Props) {
           {applying ? "Applying…" : "Apply & Start Run"}
         </Button>
       </div>
+    </div>
+  );
+}
+
+
+/* ---------------------------------------------------------------------- */
+/* M7 sub-components                                                       */
+/* ---------------------------------------------------------------------- */
+
+interface ExtraIngredientCardProps {
+  extra: ExtraIngredientDraft;
+  extraIdx: number;
+  onUpdate: (patch: Partial<ExtraIngredientDraft>) => void;
+  onRemove: () => void;
+  onAddNutrient: () => void;
+  onRemoveNutrient: (nutIdx: number) => void;
+  onUpdateNutrient: (nutIdx: number, patch: Partial<NamedNutrientDraft>) => void;
+}
+
+/** One extra-ingredient card. Geometry knobs at top, nutrient sub-list
+ *  below. Nutrient cards each carry a name + the kinetic params. */
+function ExtraIngredientCard({
+  extra,
+  extraIdx,
+  onUpdate,
+  onRemove,
+  onAddNutrient,
+  onRemoveNutrient,
+  onUpdateNutrient,
+}: ExtraIngredientCardProps) {
+  return (
+    <div className="extra-ingredient-card">
+      <FieldRow label={`Ingredient ${extraIdx + 1}`}>
+        <input
+          className="text-input"
+          aria-label="ingredient name"
+          type="text"
+          value={extra.name}
+          onChange={(e) => onUpdate({ name: e.target.value })}
+        />
+        <Button onClick={onRemove}>Remove</Button>
+      </FieldRow>
+      <FieldRow label="Count">
+        <NumberInput
+          label="N"
+          ariaLabel="extra ingredient count"
+          value={extra.count}
+          min={1}
+          max={64}
+          step={1}
+          unit=""
+          onCommit={(n) => onUpdate({ count: Math.round(n) })}
+        />
+      </FieldRow>
+      <FieldRow label="Axis">
+        <Select
+          ariaLabel="extra ingredient cylinder axis"
+          value={extra.axis}
+          options={[
+            { value: "x", label: "x (horizontal)" },
+            { value: "y", label: "y (horizontal)" },
+            { value: "z", label: "z (vertical)" },
+          ]}
+          onChange={(axis) => onUpdate({ axis })}
+        />
+      </FieldRow>
+      <FieldRow label="Diameter">
+        <NumberInput
+          label="∅"
+          ariaLabel="extra ingredient diameter in mm"
+          value={extra.diameter_m * 1000}
+          min={5}
+          max={80}
+          step={1}
+          unit="mm"
+          onCommit={(mm) => onUpdate({ diameter_m: mm / 1000 })}
+        />
+      </FieldRow>
+      <FieldRow label="Length">
+        <NumberInput
+          label="L"
+          ariaLabel="extra ingredient length in mm"
+          value={extra.length_m * 1000}
+          min={10}
+          max={200}
+          step={1}
+          unit="mm"
+          onCommit={(mm) => onUpdate({ length_m: mm / 1000 })}
+        />
+      </FieldRow>
+      <FieldRow label="Density">
+        <NumberInput
+          label="ρ"
+          ariaLabel="ingredient tissue density in kg per cubic metre"
+          value={extra.density_kg_per_m3}
+          min={500}
+          max={1500}
+          step={10}
+          unit="kg/m³"
+          onCommit={(v) => onUpdate({ density_kg_per_m3: v })}
+        />
+      </FieldRow>
+      <FieldRow label="Position Z">
+        <NumberInput
+          label="z"
+          ariaLabel="extra ingredient z coordinate in metres"
+          value={extra.position[2]}
+          min={0.005}
+          max={0.15}
+          step={0.005}
+          unit="m"
+          onCommit={(z) =>
+            onUpdate({ position: [extra.position[0], extra.position[1], z] })
+          }
+        />
+      </FieldRow>
+
+      {/* Nutrients sub-list */}
+      <div className="extra-ingredient-card__nutrients">
+        <FieldRow
+          label={`Nutrients (${extra.nutrients.length})`}
+        >
+          <Button onClick={onAddNutrient}>+ Add nutrient</Button>
+        </FieldRow>
+        {extra.nutrients.map((nut, nutIdx) => (
+          <NutrientCard
+            key={`extra-${extraIdx}-nut-${nutIdx}`}
+            nut={nut}
+            onUpdate={(patch) => onUpdateNutrient(nutIdx, patch)}
+            onRemove={() => onRemoveNutrient(nutIdx)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+
+interface NutrientCardProps {
+  nut: NamedNutrientDraft;
+  onUpdate: (patch: Partial<NamedNutrientDraft>) => void;
+  onRemove: () => void;
+}
+
+/** One nutrient card inside an extra ingredient. Exposes the user-
+ *  tunable kinetic params; everything else (nu_water, D_water_molec)
+ *  defaults from makeBlankNutrient(). */
+function NutrientCard({ nut, onUpdate, onRemove }: NutrientCardProps) {
+  return (
+    <div className="nutrient-card">
+      <FieldRow label="Name">
+        <input
+          className="text-input"
+          aria-label="nutrient name"
+          type="text"
+          value={nut.name}
+          placeholder="e.g. starch, beta_carotene"
+          onChange={(e) => onUpdate({ name: e.target.value })}
+        />
+        <Button onClick={onRemove}>Remove</Button>
+      </FieldRow>
+      <FieldRow label="Enabled">
+        <Select
+          ariaLabel="nutrient enabled"
+          value={nut.enabled ? "on" : "off"}
+          options={[
+            { value: "on", label: "On" },
+            { value: "off", label: "Off" },
+          ]}
+          onChange={(v) => onUpdate({ enabled: v === "on" })}
+        />
+      </FieldRow>
+      <FieldRow label="C₀ (mg/kg)">
+        <NumberInput
+          label="C₀"
+          ariaLabel="initial nutrient concentration mg per kg ingredient"
+          value={nut.C0_mg_per_kg}
+          min={0}
+          max={1.0e6}
+          step={1}
+          unit="mg/kg"
+          onCommit={(v) => onUpdate({ C0_mg_per_kg: v })}
+        />
+      </FieldRow>
+      <FieldRow label="K_partition">
+        <NumberInput
+          label="K"
+          ariaLabel="partition coefficient water over ingredient"
+          value={nut.K_partition}
+          min={1.0e-7}
+          max={10.0}
+          step={1.0e-3}
+          unit=""
+          onCommit={(v) => onUpdate({ K_partition: v })}
+        />
+      </FieldRow>
+      <FieldRow label="E_a (kJ/mol)">
+        <NumberInput
+          label="Eₐ"
+          ariaLabel="Arrhenius activation energy"
+          value={nut.E_a_kJ_per_mol}
+          min={10}
+          max={200}
+          step={1}
+          unit="kJ/mol"
+          onCommit={(v) => onUpdate({ E_a_kJ_per_mol: v })}
+        />
+      </FieldRow>
+    </div>
+  );
+}
+
+
+interface CouplingCardProps {
+  coupling: CouplingDraft;
+  onUpdate: (patch: Partial<CouplingDraft>) => void;
+  onRemove: () => void;
+}
+
+function CouplingCard({ coupling, onUpdate, onRemove }: CouplingCardProps) {
+  return (
+    <div className="coupling-card">
+      <FieldRow label="Protector">
+        <input
+          className="text-input"
+          aria-label="protector ingredient.nutrient identifier"
+          type="text"
+          value={coupling.protector}
+          placeholder="e.g. carrot.vitamin_c"
+          onChange={(e) => onUpdate({ protector: e.target.value })}
+        />
+        <Button onClick={onRemove}>Remove</Button>
+      </FieldRow>
+      <FieldRow label="Protected">
+        <input
+          className="text-input"
+          aria-label="protected ingredient.nutrient identifier"
+          type="text"
+          value={coupling.protected}
+          placeholder="e.g. carrot.beta_carotene"
+          onChange={(e) => onUpdate({ protected: e.target.value })}
+        />
+      </FieldRow>
+      <FieldRow label="Enabled">
+        <Select
+          ariaLabel="coupling enabled"
+          value={coupling.enabled ? "on" : "off"}
+          options={[
+            { value: "on", label: "On" },
+            { value: "off", label: "Off" },
+          ]}
+          onChange={(v) => onUpdate({ enabled: v === "on" })}
+        />
+      </FieldRow>
+      <FieldRow label="η (slope)">
+        <NumberInput
+          label="η"
+          ariaLabel="protection slope eta"
+          value={coupling.eta}
+          min={0}
+          max={5}
+          step={0.05}
+          unit=""
+          onCommit={(v) => onUpdate({ eta: v })}
+        />
+      </FieldRow>
+      <FieldRow label="C_ref (mg/kg)">
+        <NumberInput
+          label="C_ref"
+          ariaLabel="reference protector concentration"
+          value={coupling.c_ref_mg_per_kg}
+          min={0.1}
+          max={1.0e4}
+          step={0.5}
+          unit="mg/kg"
+          onCommit={(v) => onUpdate({ c_ref_mg_per_kg: v })}
+        />
+      </FieldRow>
+      <FieldRow label="η_max">
+        <NumberInput
+          label="η_max"
+          ariaLabel="protection cap"
+          value={coupling.eta_max}
+          min={0}
+          max={0.99}
+          step={0.05}
+          unit=""
+          onCommit={(v) => onUpdate({ eta_max: v })}
+        />
+      </FieldRow>
     </div>
   );
 }

@@ -30,7 +30,7 @@ from boilingsim.thermal import (
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_YAML = ROOT / "configs" / "scenarios" / "default.yaml"
+DEFAULT_YAML = ROOT / "configs" / "scenarios" / "single_carrot.yaml"
 
 
 # ---------------------------------------------------------------------------

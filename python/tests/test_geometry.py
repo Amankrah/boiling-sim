@@ -23,7 +23,7 @@ from boilingsim.geometry import (
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_YAML = ROOT / "configs" / "scenarios" / "default.yaml"
+DEFAULT_YAML = ROOT / "configs" / "scenarios" / "single_carrot.yaml"
 
 
 @pytest.fixture(scope="module")
@@ -203,6 +203,78 @@ def test_wall_mat_matches_sdf(grid):
     assert (sdf[wall] < 0).all(), "some pot-wall cells have sdf>=0"
 
 
+def test_multi_ingredient_voxelizes_with_distinct_ingredient_ids():
+    """Multi-ingredient scenario writes ingredient_id=k+1 for each
+    ingredient k. Validates the M4 two-pass voxelization (base
+    materials, then per-ingredient overlay)."""
+    from boilingsim.config import ScenarioConfig
+    cfg = ScenarioConfig.model_validate({
+        "extra_ingredients": [{
+            "name": "potato",
+            "count": 2,
+            "axis": "x",
+            "diameter_m": 0.025,
+            "length_m": 0.040,
+            "position": [0.0, -0.040, 0.040],
+        }]
+    })
+    cfg.grid.dx_m = 0.004  # coarser for speed
+    grid = build_pot_geometry(cfg)
+    ing = grid.ingredient_id.numpy()
+    mat = grid.mat.numpy()
+
+    # Three ingredient labels expected: 0 (non-ingredient), 1 (carrot),
+    # 2 (potato).
+    assert sorted(np.unique(ing).tolist()) == [0, 1, 2]
+    # Both ingredients have non-empty voxel sets.
+    assert int((ing == 1).sum()) > 0, "carrot has zero voxels"
+    assert int((ing == 2).sum()) > 0, "potato has zero voxels"
+    # Every ingredient cell is also MAT_CARROT in the mat array (M4
+    # keeps a single material ID for any ingredient; per-ingredient
+    # nutrient kinetics are M4-extended).
+    ing_cells = ing != 0
+    carrot_mat_cells = mat == MAT_CARROT
+    assert np.array_equal(ing_cells, carrot_mat_cells)
+
+
+def test_instance_id_voxelizes_to_count_distinct_labels():
+    """Multi-carrot rasterization writes c+1 into instance_id for every
+    carrot voxel, where c is the carrot index. Validates the M3
+    voxelization branch -- per-instance retention diagnostics depend on
+    this label being correct (and on every carrot getting a non-empty
+    voxel set)."""
+    cfg = load_scenario(DEFAULT_YAML)
+    cfg.carrot.count = 3
+    cfg.carrot.axis = "x"
+    cfg.carrot.length_m = 0.040
+    cfg.grid.dx_m = 0.002
+    grid = build_pot_geometry(cfg)
+
+    ids = grid.instance_id.numpy()
+    mat = grid.mat.numpy()
+
+    # instance_id is 0 outside carrots, c+1 inside carrot c.
+    unique_ids = sorted(np.unique(ids).tolist())
+    assert unique_ids == [0, 1, 2, 3], f"unexpected instance ids: {unique_ids}"
+
+    # Every cell with mat==MAT_CARROT must have a non-zero instance label,
+    # and vice versa.
+    carrot_cells = mat == MAT_CARROT
+    label_cells = ids != 0
+    assert np.array_equal(carrot_cells, label_cells), (
+        "instance_id and mat==MAT_CARROT mask disagree"
+    )
+
+    # Each instance label has approximately equal voxel count (same
+    # geometry, just translated). Allow 5% spread for cell-edge effects.
+    counts = [int((ids == c + 1).sum()) for c in range(3)]
+    mean_count = sum(counts) / 3
+    for c, n in enumerate(counts):
+        assert abs(n - mean_count) / mean_count < 0.05, (
+            f"carrot {c} cell count {n} too far from mean {mean_count}"
+        )
+
+
 def test_n_carrot_cells_scales_linearly_with_count():
     """Doubling cfg.carrot.count should roughly double the carrot cell
     count (within 5 % discretization tolerance). Sanity check that
@@ -279,7 +351,14 @@ def test_velocity_and_pressure_start_zero(grid):
 
 
 def test_usd_export(default_cfg, tmp_path):
-    """End-to-end: build all meshes, export USD, reopen and verify prims."""
+    """End-to-end: build all meshes, export USD, reopen and verify prims.
+
+    v6 multi-carrot: ``export_scene_usd`` accepts a *list* of point
+    arrays (one per carrot instance) under a shared ``/World/Carrots``
+    group prim. A single-carrot scenario therefore lands at
+    ``/World/Carrots/Carrot_0``; the existing default.yaml ships count=3
+    horizontal carrots, so we expect Carrot_0..Carrot_2.
+    """
     from pxr import Usd
 
     pot_mesh = build_pot_mesh(default_cfg)
@@ -289,14 +368,79 @@ def test_usd_export(default_cfg, tmp_path):
         default_cfg.carrot.length_m,
         20,  # coarser for speed in this test
     )
-    pts = translate_points(pts, default_cfg.carrot.position)
+    # The export function expects a list of points per instance. For
+    # this single-carrot test, wrap a translated copy in a 1-element list.
+    pts_translated = translate_points(pts, default_cfg.carrot.position)
 
     out = tmp_path / "scene.usd"
-    export_scene_usd(out, pot_mesh, water_mesh, pts, tris)
+    export_scene_usd(out, pot_mesh, water_mesh, [pts_translated], tris)
     assert out.exists() and out.stat().st_size > 0
 
     stage = Usd.Stage.Open(str(out))
     assert stage is not None
     assert stage.GetPrimAtPath("/World/Pot").IsValid()
     assert stage.GetPrimAtPath("/World/Water").IsValid()
-    assert stage.GetPrimAtPath("/World/Carrot").IsValid()
+    assert stage.GetPrimAtPath("/World/Carrots").IsValid()
+    assert stage.GetPrimAtPath("/World/Carrots/Carrot_0").IsValid()
+
+
+def test_usd_export_emits_n_meshes_for_multi_carrot(default_cfg, tmp_path):
+    """3-carrot scenario must emit 3 carrot prims under /World/Carrots,
+    each at the auto-placed centre. Validates the M1 multi-mesh path."""
+    from pxr import Usd
+
+    from boilingsim.config import auto_place_carrots
+    from boilingsim.scenario import _orient_and_translate_carrot
+
+    cfg = default_cfg.model_copy(deep=True)
+    cfg.carrot.count = 3
+    cfg.carrot.axis = "x"
+    cfg.carrot.length_m = 0.060
+    cfg.carrot.position = (0.0, 0.0, 0.040)
+
+    pot_mesh = build_pot_mesh(cfg)
+    water_mesh = build_water_surface_mesh(cfg)
+    canonical_pts, _, tris = build_carrot_mesh(
+        cfg.carrot.diameter_m,
+        cfg.carrot.length_m,
+        20,
+    )
+    inner_radius = cfg.pot.diameter_m / 2 - cfg.pot.wall_thickness_m
+    water_height = cfg.water.fill_fraction * (cfg.pot.height_m - cfg.pot.base_thickness_m)
+    centres = auto_place_carrots(
+        count=cfg.carrot.count,
+        axis=cfg.carrot.axis,
+        anchor=cfg.carrot.position,
+        diameter_m=cfg.carrot.diameter_m,
+        length_m=cfg.carrot.length_m,
+        inner_radius=inner_radius,
+        base_thickness=cfg.pot.base_thickness_m,
+        water_top_z=cfg.pot.base_thickness_m + water_height,
+    )
+    pts_per_instance = [
+        _orient_and_translate_carrot(canonical_pts, cfg.carrot.axis, cfg.carrot.length_m, c)
+        for c in centres
+    ]
+
+    out = tmp_path / "multi.usd"
+    export_scene_usd(out, pot_mesh, water_mesh, pts_per_instance, tris)
+
+    stage = Usd.Stage.Open(str(out))
+    assert stage is not None
+    for i in range(3):
+        assert stage.GetPrimAtPath(f"/World/Carrots/Carrot_{i}").IsValid(), (
+            f"missing Carrot_{i} prim"
+        )
+    # Distinct centroids -- not the same translated mesh.
+    from pxr import UsdGeom
+    centroids = []
+    for i in range(3):
+        prim = UsdGeom.Mesh(stage.GetPrimAtPath(f"/World/Carrots/Carrot_{i}"))
+        pts = np.asarray(prim.GetPointsAttr().Get(), dtype=np.float32)
+        centroids.append(pts.mean(axis=0))
+    centroids_np = np.array(centroids)
+    # y-coordinate spread should match auto-placement spacing (1.2*d).
+    y_spread = centroids_np[:, 1].max() - centroids_np[:, 1].min()
+    assert y_spread > cfg.carrot.diameter_m, (
+        f"expected y-spread > {cfg.carrot.diameter_m}, got {y_spread}"
+    )

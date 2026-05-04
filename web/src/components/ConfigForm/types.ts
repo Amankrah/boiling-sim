@@ -28,6 +28,12 @@ export interface CarrotDraft {
   count: number;
   /** Cylinder axis. "z" is legacy vertical; "x"/"y" are horizontal. */
   axis: "x" | "y" | "z";
+  /** Quantity-input mode. "dimensions" lets the user set length_m
+   *  directly (legacy); "mass" derives length_m from target_mass_g
+   *  so users can specify "I want 200 g of carrots". */
+  mass_mode: "dimensions" | "mass";
+  /** Required iff mass_mode="mass". Total grams across all instances. */
+  target_mass_g: number | null;
   initial_beta_carotene_mg_per_100g: number;
 }
 
@@ -98,10 +104,58 @@ export interface SimulationDraft {
   output_every_s: number;
 }
 
+/** M7: one extra ingredient (M4+ ``cfg.extra_ingredients[k]``).
+ *
+ *  Carries the same geometry knobs as ``CarrotDraft`` plus its own
+ *  display name, density, and per-ingredient nutrient profiles. The
+ *  ``nutrients`` list (M8) holds an arbitrary number of solutes per
+ *  ingredient; the first two get translated to the legacy
+ *  ``nutrient`` / ``nutrient2`` slots on the Python side, the rest go
+ *  into ``extra_nutrients``. */
+export interface ExtraIngredientDraft {
+  /** Display name; drives the 3D scene's color palette. */
+  name: string;
+  density_kg_per_m3: number;
+  diameter_m: number;
+  length_m: number;
+  position: [number, number, number];
+  count: number;
+  axis: "x" | "y" | "z";
+  mass_mode: "dimensions" | "mass";
+  target_mass_g: number | null;
+  /** M8: variable-N nutrients per ingredient. Empty list = no
+   *  per-ingredient nutrient kinetics for this extra. */
+  nutrients: NamedNutrientDraft[];
+}
+
+/** A NutrientDraft with an explicit display name. The name doubles
+ *  as the dict key in the clean YAML schema and as the identifier
+ *  couplings reference (``ingredient.nutrient`` dotted IDs). */
+export interface NamedNutrientDraft extends NutrientDraft {
+  name: string;
+}
+
+/** M7: nutrient-nutrient coupling (Sakai 1987 protective-effect model).
+ *  Each coupling references its protector + protected by dotted
+ *  ``ingredient.nutrient`` identifiers. */
+export interface CouplingDraft {
+  /** ``"carrot.vitamin_c"`` etc. Empty string = unset (skipped). */
+  protector: string;
+  protected: string;
+  enabled: boolean;
+  eta: number;
+  c_ref_mg_per_kg: number;
+  eta_max: number;
+}
+
 export interface ScenarioDraft {
   pot: PotDraft;
   water: WaterDraft;
   carrot: CarrotDraft;
+  /** M7: ingredients beyond the legacy carrot. Empty by default. */
+  extra_ingredients: ExtraIngredientDraft[];
+  /** M7: protective couplings between solute slots. Empty by default. */
+  couplings: CouplingDraft[];
   heating: HeatingDraft;
   initial_conditions: InitialConditionsDraft;
   grid: GridDraft;
@@ -203,8 +257,12 @@ export const DEFAULT_DRAFT: ScenarioDraft = {
     position: [0.0, 0.0, 0.03],
     count: 1,
     axis: "z",
+    mass_mode: "dimensions",
+    target_mass_g: null,
     initial_beta_carotene_mg_per_100g: 8.3,
   },
+  extra_ingredients: [],
+  couplings: [],
   heating: {
     base_heat_flux_w_per_m2: 80000.0,
     ambient_temp_c: 22.0,
@@ -332,7 +390,16 @@ export const PRESETS: Record<string, { label: string; draft: () => ScenarioDraft
  *  only transformation: Python expects `nutrient` and `nutrient2`
  *  keys on ScenarioConfig, and a separate `total_time_s` /
  *  `output_every_s` on the top level (not nested under
- *  `simulation`). */
+ *  `simulation`).
+ *
+ *  M7+M8: extras with their nutrient lists are emitted as
+ *  ``extra_ingredients[]`` with ``nutrient`` (slot 0), ``nutrient2``
+ *  (slot 1), and ``extra_nutrients`` (slot 2+) blocks. Couplings are
+ *  emitted as ``nutrient_couplings[]`` with the coupling block's
+ *  dotted ``protector`` / ``protected`` identifiers split into
+ *  ``protector_ingredient`` + ``protector_nutrient_name`` etc. Empty
+ *  extras / couplings lists serialize as empty arrays which the
+ *  Pydantic side accepts cleanly. */
 export function draftToScenarioJson(
   d: ScenarioDraft,
 ): Record<string, unknown> {
@@ -347,7 +414,153 @@ export function draftToScenarioJson(
     boiling: d.boiling,
     nutrient: d.nutrient,
     nutrient2: d.nutrient2,
+    extra_ingredients: d.extra_ingredients.map(extraToJson),
+    nutrient_couplings: d.couplings
+      .filter((c) => c.protector && c.protected)
+      .map((c) => couplingToJson(c, d)),
     total_time_s: d.simulation.total_time_s,
     output_every_s: d.simulation.output_every_s,
+  };
+}
+
+/** Translate one extra-ingredient draft into the legacy Pydantic
+ *  shape. The first nutrient becomes ``nutrient`` (primary), the
+ *  second becomes ``nutrient2`` (secondary), the rest land in
+ *  ``extra_nutrients[]``. */
+function extraToJson(e: ExtraIngredientDraft): Record<string, unknown> {
+  const geom: Record<string, unknown> = {
+    name: e.name,
+    density_kg_per_m3: e.density_kg_per_m3,
+    diameter_m: e.diameter_m,
+    length_m: e.length_m,
+    position: e.position,
+    count: e.count,
+    axis: e.axis,
+    mass_mode: e.mass_mode,
+    target_mass_g: e.target_mass_g,
+  };
+  const nuts = e.nutrients;
+  if (nuts.length >= 1) geom.nutrient = stripName(nuts[0]);
+  if (nuts.length >= 2) geom.nutrient2 = stripName(nuts[1]);
+  if (nuts.length >= 3) {
+    geom.extra_nutrients = nuts.slice(2).map(stripName);
+  }
+  return geom;
+}
+
+function stripName(n: NamedNutrientDraft): NutrientDraft & { name: string } {
+  // Python's NutrientConfig has ``name`` as a real field (M6), so
+  // we just pass it through. Keeping the helper for symmetry.
+  return { ...n };
+}
+
+/** Translate one coupling draft into the legacy Pydantic shape.
+ *  Splits the dotted ``protector`` (e.g. ``carrot.vitamin_c``) into
+ *  its ingredient + nutrient parts. The Python translator picks the
+ *  right slot literal vs nutrient-name field based on whether the
+ *  nutrient sits in the legacy 2-slot pair or in ``extra_nutrients``. */
+function couplingToJson(
+  c: CouplingDraft,
+  d: ScenarioDraft,
+): Record<string, unknown> {
+  const [protI, protN] = (c.protector ?? "").split(".");
+  const [tgtI, tgtN] = (c.protected ?? "").split(".");
+  // Resolve slot via name lookup against the draft itself so the JSON
+  // matches what the Pydantic resolver expects on the receive side.
+  const out: Record<string, unknown> = {
+    enabled: c.enabled,
+    eta: c.eta,
+    c_ref_mg_per_kg: c.c_ref_mg_per_kg,
+    eta_max: c.eta_max,
+    protector_ingredient: protI ?? "",
+    protected_ingredient: tgtI ?? "",
+    ...slotIdentForDraft(d, protI, protN, "protector"),
+    ...slotIdentForDraft(d, tgtI, tgtN, "protected"),
+  };
+  return out;
+}
+
+/** Resolve ``ingredient.nutrient`` against a draft's ingredient list
+ *  to either the legacy slot literal ("primary"/"secondary") or the
+ *  M8 ``protector_nutrient_name`` field. Falls back to ``primary`` if
+ *  the lookup fails (the Python side will surface a clearer error
+ *  during validation). */
+function slotIdentForDraft(
+  d: ScenarioDraft,
+  ingName: string | undefined,
+  nutName: string | undefined,
+  kind: "protector" | "protected",
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!ingName || !nutName) return out;
+  // Ingredient 0 (legacy carrot): nutrient slot 0/1 only.
+  if (ingName === "carrot" || !d.extra_ingredients.find((e) => e.name === ingName)) {
+    // Ingredient 0's nutrient names live on d.nutrient.name / d.nutrient2.name
+    // (added by M6 schema). Fall back to "primary" if the field hasn't been
+    // populated yet.
+    out[`${kind}_slot`] = nutName === "vitamin_c" ? "secondary" : "primary";
+    return out;
+  }
+  // Extra ingredient: find the nutrient by name in its list.
+  const extra = d.extra_ingredients.find((e) => e.name === ingName);
+  if (!extra) return out;
+  const idx = extra.nutrients.findIndex((n) => n.name === nutName);
+  if (idx === 0) {
+    out[`${kind}_slot`] = "primary";
+  } else if (idx === 1) {
+    out[`${kind}_slot`] = "secondary";
+  } else if (idx >= 2) {
+    out[`${kind}_nutrient_name`] = nutName;
+    out[`${kind}_slot`] = "primary"; // placeholder; Python uses the name field
+  }
+  return out;
+}
+
+/** Factory for an "Add ingredient" button. Defaults to a small
+ *  potato with a single starch nutrient, off (so adding the row
+ *  doesn't accidentally enable nutrient kernels). */
+export function makeBlankIngredient(): ExtraIngredientDraft {
+  return {
+    name: "potato",
+    density_kg_per_m3: 1080.0,
+    diameter_m: 0.030,
+    length_m: 0.040,
+    position: [0.0, -0.040, 0.040],
+    count: 1,
+    axis: "x",
+    mass_mode: "dimensions",
+    target_mass_g: null,
+    nutrients: [],
+  };
+}
+
+/** Factory for an "Add nutrient" button on an ingredient. Defaults
+ *  to a disabled β-carotene preset with an empty name (user must
+ *  pick a name before applying). */
+export function makeBlankNutrient(name = ""): NamedNutrientDraft {
+  return {
+    name,
+    enabled: false,
+    E_a_kJ_per_mol: 60.0,
+    k0_per_s: 1.0e6,
+    D_eff_m2_per_s: 2.0e-10,
+    K_partition: 1.0,
+    C_water_sat_mg_per_kg: 1.0e3,
+    C0_mg_per_kg: 100.0,
+    nu_water_m2_per_s: 2.94e-7,
+    D_water_molec_m2_per_s: 1.0e-9,
+  };
+}
+
+/** Factory for an "Add coupling" button. Empty protector/protected
+ *  fields (user must fill them in via dropdowns). */
+export function makeBlankCoupling(): CouplingDraft {
+  return {
+    protector: "",
+    protected: "",
+    enabled: true,
+    eta: 0.5,
+    c_ref_mg_per_kg: 5.0,
+    eta_max: 0.5,
   };
 }

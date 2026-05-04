@@ -29,7 +29,7 @@ from boilingsim.nutrient import (
 @pytest.fixture(scope="module")
 def nut_cfg() -> ScenarioConfig:
     """Dev-grid config with nutrient physics enabled."""
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.grid.dx_m = 0.002
     return cfg
@@ -65,7 +65,7 @@ def test_constant_t_degradation(nut_cfg):
     kernel, and compare to the analytic exponential. Because we use the
     exact-integration form ``C *= exp(-k*dt)``, the numerical retention
     should agree to full single-precision."""
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.grid.dx_m = 0.002
     grid = build_pot_geometry(cfg)
@@ -94,7 +94,7 @@ def test_constant_t_degradation(nut_cfg):
 def test_no_degradation_at_cold_t(nut_cfg):
     """Arrhenius rate at 20 C should be vanishingly small; 600 s of stepping
     should leave retention above 99.99 %."""
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.grid.dx_m = 0.002
     grid = build_pot_geometry(cfg)
@@ -121,7 +121,7 @@ def test_degradation_only_in_carrot_cells():
     """Set every cell to C = C0 manually; run degradation with carrot at 100 C
     and everything else at 0 C. Non-carrot cells must be untouched; carrot
     cells must decay."""
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.grid.dx_m = 0.002
     grid = build_pot_geometry(cfg)
@@ -177,7 +177,7 @@ def test_diffusion_preserves_mass_under_neumann_bc():
     diffusion steps. A uniform initial field isn't a good test (Laplacian is
     zero everywhere), so seed a gaussian peak at the carrot centre and run
     for 10 s."""
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.grid.dx_m = 0.002
     grid = build_pot_geometry(cfg)
@@ -217,7 +217,7 @@ def test_diffusion_does_not_leak_into_non_carrot_cells():
     that isn't carrot, even after many diffusion steps. This guards against
     accidentally writing to non-carrot cells in the kernel (or leaking the
     scratch buffer back)."""
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.grid.dx_m = 0.002
     grid = build_pot_geometry(cfg)
@@ -254,7 +254,7 @@ def test_diffusion_analytic_1d_slab():
     sideways diffusion). Compare decay to the closed-form analytic
     ``C(z, t) = C0 * cos(pi*(z-z0)/L) * exp(-(pi/L)^2 * D_eff * t)`` at the
     top/bottom of the carrot (the cosine-mode maxima)."""
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.grid.dx_m = 0.002
     # Pin to the legacy single-carrot vertical layout. This test seeds a
@@ -330,7 +330,7 @@ def _build_leach_scenario(u_mag_mps: float):
     """Helper: build a dev-grid geometry with nutrient enabled, zero velocities
     (by default) or uniformly set to ``u_mag_mps`` along x. Returns (cfg, grid).
     """
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.grid.dx_m = 0.002
     grid = build_pot_geometry(cfg)
@@ -372,7 +372,7 @@ def test_sherwood_at_known_re(nut_cfg):
 def test_sherwood_floor_at_stagnant():
     """At Re -> 0 the forced-convection term collapses; h_m should fall back
     to the Sh = 2 natural-convection floor."""
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     D_carrot = cfg.carrot.diameter_m
     Dw = cfg.nutrient.D_water_molec_m2_per_s
@@ -529,7 +529,7 @@ def test_c_water_advection_moves_scalar_downstream():
     """Seed a localised C_water blob, set a uniform velocity in +x, advect a
     few steps with ``step_advect_c_water``. The blob's centre of mass should
     shift in +x by approximately ``u*t``."""
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.grid.dx_m = 0.002
     grid = build_pot_geometry(cfg)
@@ -599,7 +599,7 @@ def test_c_water_advection_conserves_total_mass():
     mass leaked through the domain boundary and into solid-adjacent cells
     at ~0.5 % per step, which was laundered into degraded_pct by the
     max(0, ...) clamp we've since removed."""
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.grid.dx_m = 0.002
     grid = build_pot_geometry(cfg)
@@ -651,7 +651,7 @@ def test_c_water_advection_conserves_total_mass():
 def test_c_water_advection_no_leak_into_solids():
     """After many advection steps, C_water in non-fluid cells must stay
     exactly zero (the kernel explicitly writes 0 for solid cells)."""
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.grid.dx_m = 0.002
     grid = build_pot_geometry(cfg)
@@ -683,7 +683,7 @@ def test_full_pipeline_no_nan_over_60s():
     dev grid. No NaN, no negative C, retention stays in [0, 1]."""
     from boilingsim.pipeline import Simulation
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.boiling.enabled = True
     cfg.grid.dx_m = 0.002
@@ -719,7 +719,7 @@ def test_retention_monotonic_decreasing_full_pipeline():
     advection of C_water doesn't touch C at all.)"""
     from boilingsim.pipeline import Simulation
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.boiling.enabled = True
     cfg.grid.dx_m = 0.002
@@ -753,7 +753,7 @@ def test_c_water_never_exceeds_cap_in_full_pipeline():
     """
     from boilingsim.pipeline import Simulation
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.boiling.enabled = True
     cfg.grid.dx_m = 0.002
@@ -795,7 +795,7 @@ def test_full_pipeline_mass_balance_with_precipitation():
     """
     from boilingsim.pipeline import Simulation
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.boiling.enabled = True
     cfg.grid.dx_m = 0.002
@@ -877,7 +877,7 @@ def test_dual_solute_geometry_allocates_both_fields():
     """With ``nutrient2.enabled = True`` and a distinct C0, build_pot_geometry
     must allocate an independent grid.C2 initialised from cfg.nutrient2.C0
     and a zeroed grid.C_water2. The primary field must be unaffected."""
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.nutrient2 = cfg.nutrient.model_copy(update={
         "enabled": True,
@@ -924,7 +924,7 @@ def test_dual_solute_symmetric_params_equal_retention():
     would surface the bug immediately."""
     from boilingsim.pipeline import Simulation
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.nutrient2 = cfg.nutrient.model_copy(update={"enabled": True})
     cfg.boiling.enabled = True
@@ -972,7 +972,7 @@ def test_dual_solute_independent_precipitation_counters():
         clamp_c_water_and_track_precipitation,
     )
 
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.nutrient.C_water_sat_mg_per_kg = 1.0e-3
     cfg.nutrient2 = cfg.nutrient.model_copy(update={
@@ -1039,7 +1039,7 @@ def test_dual_solute_does_not_drift_single_solute_baseline():
     from boilingsim.pipeline import Simulation
 
     def run_once(nut2_enabled: bool) -> np.ndarray:
-        cfg = load_scenario("configs/scenarios/default.yaml")
+        cfg = load_scenario("configs/scenarios/single_carrot.yaml")
         cfg.nutrient.enabled = True
         if nut2_enabled:
             cfg.nutrient2 = cfg.nutrient.model_copy(update={"enabled": True})
@@ -1069,3 +1069,377 @@ def test_dual_solute_does_not_drift_single_solute_baseline():
         f"primary retention drifts when nutrient2 is enabled: "
         f"max |R_off - R_on| = {max_drift:.3e}"
     )
+
+
+# ---------------------------------------------------------------------------
+# M3: per-instance retention diagnostics
+# ---------------------------------------------------------------------------
+
+
+def test_per_instance_retention_initialized_to_100():
+    """Right after geometry build + nutrient init, every carrot instance
+    is at 100 % retention (mass-balance baseline)."""
+    from boilingsim.pipeline import Simulation
+
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
+    cfg.nutrient.enabled = True
+    cfg.carrot.count = 3
+    cfg.carrot.axis = "x"
+    cfg.carrot.length_m = 0.060
+    cfg.carrot.position = (0.0, 0.0, 0.040)
+    cfg.grid.dx_m = 0.002
+
+    sim = Simulation(cfg)
+    sample = sim.sample_scalars(dt_last=0.0)
+
+    assert len(sample.retention_per_instance) == 3
+    for c, r in enumerate(sample.retention_per_instance):
+        assert abs(r - 100.0) < 1.0e-6, f"carrot {c} retention {r:.4f} != 100"
+
+
+def test_per_instance_retention_aggregates_to_scalar():
+    """Σ retention[i] · n_per_instance[i] / total_carrot_cells should
+    match the aggregate scalar within 1e-4 %. This is the
+    mass-conservation invariant tying per-instance reductions to the
+    global scalar."""
+    from boilingsim.pipeline import Simulation
+
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
+    cfg.nutrient.enabled = True
+    cfg.carrot.count = 3
+    cfg.carrot.axis = "x"
+    cfg.carrot.length_m = 0.060
+    cfg.carrot.position = (0.0, 0.0, 0.040)
+    cfg.grid.dx_m = 0.002
+
+    sim = Simulation(cfg)
+    # Step a few times so retention diverges from a uniform 100 % baseline
+    # (Arrhenius degrades + diffusion redistributes mass).
+    for _ in range(20):
+        sim.step()
+    sample = sim.sample_scalars(dt_last=0.0)
+
+    n_total = sum(sim._n_per_instance)
+    weighted = sum(
+        r * float(n) for r, n in zip(
+            sample.retention_per_instance, sim._n_per_instance, strict=True
+        )
+    )
+    aggregate_from_per_instance = weighted / float(n_total)
+    assert abs(aggregate_from_per_instance - sample.retention_pct) < 1.0e-3, (
+        f"per-instance weighted mean {aggregate_from_per_instance:.6f} "
+        f"!= aggregate {sample.retention_pct:.6f}"
+    )
+
+
+def test_extra_ingredient_independent_kinetics():
+    """M4-extended: an extra ingredient with its own NutrientConfig leaches
+    on its own kinetics. With identical geometry but different K_partition
+    (1e-5 for carrot, 0.5 for potato), the potato should leach noticeably
+    more than the carrot over a short window.
+    """
+    from boilingsim.config import ScenarioConfig
+    from boilingsim.pipeline import Simulation
+
+    cfg = ScenarioConfig.model_validate({
+        "nutrient": {
+            "enabled": True,
+            "E_a_kJ_per_mol": 70.0,
+            "k0_per_s": 2.63e6,
+            "D_eff_m2_per_s": 2.0e-10,
+            "K_partition": 1.0e-5,    # carrot: very poorly soluble
+            "C_water_sat_mg_per_kg": 6.0e-3,
+            "C0_mg_per_kg": 83.0,
+        },
+        "extra_ingredients": [{
+            "name": "potato",
+            "count": 1,
+            "axis": "x",
+            "diameter_m": 0.025,
+            "length_m": 0.040,
+            "position": [0.0, -0.040, 0.040],
+            "nutrient": {
+                "enabled": True,
+                "E_a_kJ_per_mol": 50.0,
+                "k0_per_s": 1.0e5,
+                "D_eff_m2_per_s": 5.0e-10,
+                "K_partition": 0.5,   # potato: much more soluble
+                "C_water_sat_mg_per_kg": 100.0,
+                "C0_mg_per_kg": 200.0,
+            },
+        }],
+        "initial_conditions": {"mode": "preheat"},
+    })
+    cfg.grid.dx_m = 0.004
+    sim = Simulation(cfg)
+
+    # Each ingredient should have its own primary slot with the right
+    # ingredient_idx and D_carrot. M8: extra_slots is a list-of-lists
+    # now (one entry per extra, each entry is a flat list of slots).
+    assert sim.primary_slot is not None
+    assert sim.primary_slot.ingredient_idx == 0
+    assert len(sim.extra_slots) == 1
+    slots_for_potato = sim.extra_slots[0]
+    assert len(slots_for_potato) == 1
+    extra_primary = slots_for_potato[0]
+    assert extra_primary.ingredient_idx == 1
+    assert abs(extra_primary.D_carrot - 0.025) < 1.0e-6
+
+    carrot_C0 = float(sim.grid.C.numpy().sum())
+    potato_C0 = float(extra_primary.C.numpy().sum())
+    for _ in range(50):
+        sim.step()
+    wp.synchronize()
+    carrot_drop = 1.0 - float(sim.grid.C.numpy().sum()) / carrot_C0
+    potato_drop = 1.0 - float(extra_primary.C.numpy().sum()) / potato_C0
+
+    # Potato (K=0.5) must lose at least an order of magnitude more mass
+    # than carrot (K=1e-5) over the same window. Exact ratio is sensitive
+    # to surface area + bulk fluid coupling, so just assert "meaningfully
+    # more".
+    assert potato_drop > 10.0 * carrot_drop, (
+        f"potato drop {potato_drop:.3e} not >> carrot drop {carrot_drop:.3e}"
+    )
+
+
+def test_m8_three_nutrients_on_extra_each_get_their_own_slot():
+    """M8: an extra ingredient with 3 declared nutrients gets 3 SoluteSlots
+    at pipeline init, each with its own C field and ``cfg_nutrient`` ref.
+    Validates that the variable-N cap really lifted at the pipeline layer."""
+    from boilingsim.config import ScenarioConfig
+    from boilingsim.pipeline import Simulation
+
+    cfg = ScenarioConfig.model_validate({
+        "ingredients": [
+            {
+                "name": "carrot",
+                "count": 1,
+                "axis": "z",
+                "diameter_m": 0.025,
+                "length_m": 0.05,
+                "position": [0.0, 0.0, 0.030],
+                "nutrients": {
+                    "beta_carotene": {"enabled": True, "C0_mg_per_kg": 83.0},
+                },
+            },
+            {
+                "name": "potato",
+                "count": 1,
+                "axis": "x",
+                "diameter_m": 0.025,
+                "length_m": 0.040,
+                "position": [0.0, -0.040, 0.040],
+                "nutrients": {
+                    "starch":     {"enabled": True, "C0_mg_per_kg": 200000.0,
+                                    "K_partition": 0.5},
+                    "vitamin_b6": {"enabled": True, "C0_mg_per_kg": 30.0,
+                                    "K_partition": 1.0},
+                    "potassium":  {"enabled": True, "C0_mg_per_kg": 4000.0,
+                                    "K_partition": 1.0},
+                },
+            },
+        ],
+        "initial_conditions": {"mode": "preheat"},
+    })
+    cfg.grid.dx_m = 0.004
+    sim = Simulation(cfg)
+
+    # Potato extra now carries 3 enabled slots.
+    slots_for_potato = sim.extra_slots[0]
+    assert len(slots_for_potato) == 3
+    names = sorted(s.cfg_nutrient.name for s in slots_for_potato)
+    assert names == ["potassium", "starch", "vitamin_b6"]
+    # Each slot owns its own C field (different memory).
+    C_addrs = {id(s.C) for s in slots_for_potato}
+    assert len(C_addrs) == 3
+    # Ingredient idx is the same (all on potato).
+    assert all(s.ingredient_idx == 1 for s in slots_for_potato)
+
+
+def test_coupling_disabled_matches_baseline():
+    """M5: with nutrient_couplings empty (default), per-slot rate
+    multipliers stay at 1.0 and the M4-extended baseline retention
+    trace is reproduced exactly. Defends against accidental coupling
+    activation in scenarios that didn't ask for it.
+    """
+    from boilingsim.config import ScenarioConfig
+    from boilingsim.pipeline import Simulation
+
+    def run(with_coupling: bool) -> float:
+        cfg = ScenarioConfig.model_validate({
+            "nutrient": {
+                "enabled": True,
+                "E_a_kJ_per_mol": 60.0,
+                "k0_per_s": 1.0e6,
+                "D_eff_m2_per_s": 2.0e-10,
+                "K_partition": 1.0e-5,
+                "C0_mg_per_kg": 100.0,
+                "C_water_sat_mg_per_kg": 6.0e-3,
+            },
+            "nutrient2": {
+                "enabled": True,
+                "E_a_kJ_per_mol": 41.0,
+                "k0_per_s": 1.0e3,
+                "D_eff_m2_per_s": 5.0e-10,
+                "K_partition": 0.5,
+                "C0_mg_per_kg": 200.0,
+                "C_water_sat_mg_per_kg": 1.0e3,
+            },
+            "initial_conditions": {"mode": "preheat"},
+            "nutrient_couplings": (
+                [{"protector_ingredient": "carrot",
+                  "protector_slot": "secondary",
+                  "protected_ingredient": "carrot",
+                  "protected_slot": "primary",
+                  "enabled": False}]      # disabled flag → no protection
+                if with_coupling else []
+            ),
+        })
+        cfg.grid.dx_m = 0.004
+        sim = Simulation(cfg)
+        for _ in range(20):
+            sim.step()
+        wp.synchronize()
+        return float(sim.grid.C.numpy().sum())
+
+    no_coupling = run(with_coupling=False)
+    disabled_coupling = run(with_coupling=True)
+    # An entry with enabled=False is silently skipped, so the
+    # trajectory must match exactly.
+    assert abs(no_coupling - disabled_coupling) / no_coupling < 1.0e-9, (
+        f"disabled coupling perturbed baseline: "
+        f"|delta|/baseline = {abs(no_coupling - disabled_coupling)/no_coupling:.3e}"
+    )
+
+
+def test_coupling_protection_slows_degradation():
+    """M5: with vitamin C → β-carotene coupling enabled, β-carotene mass
+    drops more slowly than the same scenario with coupling off. Tests
+    the Sakai-1987-style protective effect (free-radical scavenging
+    by AA suppresses carotenoid degradation while AA is present).
+    """
+    from boilingsim.config import ScenarioConfig
+    from boilingsim.pipeline import Simulation
+
+    def run(coupling_enabled: bool) -> float:
+        cfg = ScenarioConfig.model_validate({
+            # β-carotene as primary. Boost k0 + drop Ea so degradation
+            # makes a measurable mark in 200 short steps; otherwise the
+            # protection signal is below float-precision noise.
+            "nutrient": {
+                "enabled": True,
+                "E_a_kJ_per_mol": 30.0,
+                "k0_per_s": 1.0e2,
+                "D_eff_m2_per_s": 2.0e-10,
+                "K_partition": 1.0e-5,
+                "C0_mg_per_kg": 100.0,
+                "C_water_sat_mg_per_kg": 6.0e-3,
+            },
+            # Vitamin C as secondary, leaching readily so the water-side
+            # mean grows quickly enough to engage the coupling.
+            "nutrient2": {
+                "enabled": True,
+                "E_a_kJ_per_mol": 41.0,
+                "k0_per_s": 1.0e3,
+                "D_eff_m2_per_s": 5.0e-10,
+                "K_partition": 0.5,
+                "C0_mg_per_kg": 200.0,
+                "C_water_sat_mg_per_kg": 1.0e3,
+            },
+            "initial_conditions": {"mode": "preheat"},
+            "nutrient_couplings": (
+                [{"protector_ingredient": "carrot",
+                  "protector_slot": "secondary",
+                  "protected_ingredient": "carrot",
+                  "protected_slot": "primary",
+                  "enabled": True,
+                  "eta": 0.5,
+                  "c_ref_mg_per_kg": 0.001,  # tiny ref so protection
+                                             # saturates quickly even at
+                                             # short dt × steps
+                  "eta_max": 0.5}]
+                if coupling_enabled else []
+            ),
+        })
+        cfg.grid.dx_m = 0.004
+        sim = Simulation(cfg)
+        for _ in range(200):
+            sim.step()
+        wp.synchronize()
+        return float(sim.grid.C.numpy().sum())
+
+    bc_uncoupled = run(coupling_enabled=False)
+    bc_coupled = run(coupling_enabled=True)
+    # Protected scenario must retain MORE β-carotene than the unprotected
+    # baseline (smaller drop). Allow a small floor in case the coupling
+    # is too weak to register at this dt × steps -- tune c_ref so it
+    # registers.
+    assert bc_coupled > bc_uncoupled, (
+        f"coupling didn't slow degradation: "
+        f"coupled mass {bc_coupled:.3f} <= uncoupled {bc_uncoupled:.3f}"
+    )
+
+
+def test_coupling_eta_max_caps_protection():
+    """M5: even at huge protector concentrations, the rate multiplier
+    can't drop below ``1 - eta_max``. Defends against a runaway
+    protective effect that would zero out degradation under unrealistic
+    AA loadings.
+    """
+    from boilingsim.config import ScenarioConfig
+    from boilingsim.pipeline import Simulation
+
+    cfg = ScenarioConfig.model_validate({
+        "nutrient": {
+            "enabled": True,
+            "C0_mg_per_kg": 100.0,
+        },
+        "nutrient2": {
+            "enabled": True,
+            "C0_mg_per_kg": 1.0e6,           # absurd AA loading
+            "K_partition": 1.0,
+            "C_water_sat_mg_per_kg": 1.0e9,
+        },
+        "initial_conditions": {"mode": "preheat"},
+        "nutrient_couplings": [{
+            "protector_ingredient": "carrot",
+            "protector_slot": "secondary",
+            "protected_ingredient": "carrot",
+            "protected_slot": "primary",
+            "enabled": True,
+            "eta": 100.0,                     # runaway slope
+            "c_ref_mg_per_kg": 1.0,
+            "eta_max": 0.5,                   # but cap at 50 %
+        }],
+    })
+    cfg.grid.dx_m = 0.004
+    sim = Simulation(cfg)
+    sim.step()                                # populate C_water once
+    sim._apply_couplings()
+    # Even with eta=100 and huge c_protector, the multiplier must be
+    # >= 1 - eta_max == 0.5.
+    assert sim.primary_slot.rate_multiplier >= 0.5 - 1.0e-9
+    # And it should be exactly at the cap (since eta * c_protector / c_ref
+    # easily exceeds 0.5).
+    assert abs(sim.primary_slot.rate_multiplier - 0.5) < 1.0e-9
+
+
+def test_per_instance_retention_empty_for_single_carrot():
+    """count==1 keeps the per-instance vector empty (the aggregate
+    scalar already covers it). Avoids redundant length-1 vectors on the
+    wire for legacy single-carrot scenarios."""
+    from boilingsim.pipeline import Simulation
+
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
+    cfg.nutrient.enabled = True
+    cfg.carrot.count = 1
+    cfg.carrot.axis = "z"
+    cfg.carrot.length_m = 0.05
+    cfg.carrot.position = (0.0, 0.0, 0.030)
+    cfg.grid.dx_m = 0.002
+
+    sim = Simulation(cfg)
+    sample = sim.sample_scalars(dt_last=0.0)
+
+    assert sample.retention_per_instance == []
+    assert sample.retention2_per_instance == []

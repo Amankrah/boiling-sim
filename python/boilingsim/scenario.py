@@ -11,6 +11,8 @@ import pathlib
 import sys
 import time
 
+import numpy as np
+
 from .config import load_scenario
 from .geometry import (
     MAT_AIR,
@@ -186,14 +188,73 @@ def main(argv: list[str] | None = None) -> int:
         cfg.carrot.length_m,
         cfg.grid.carrot_mesh_resolution,
     )
-    c_pts_world = translate_points(c_pts, cfg.carrot.position)
-    print(f"  carrot:      {len(c_pts):,} verts, {len(c_tets):,} tets, {len(c_tris):,} surface tris")
+    # Multi-carrot: replicate the canonical mesh at each auto-placement
+    # centre. For axis="z" the centre is the cylinder base (legacy);
+    # for axis="x"/"y" it's the centroid -- but ``build_carrot_mesh``
+    # generates a vertical cylinder anchored at the origin extending
+    # +z, so we must rotate per-instance for horizontal axes.
+    from .config import auto_place_carrots
+    inner_radius = cfg.pot.diameter_m / 2 - cfg.pot.wall_thickness_m
+    water_height = cfg.water.fill_fraction * (cfg.pot.height_m - cfg.pot.base_thickness_m)
+    water_top_z = cfg.pot.base_thickness_m + water_height
+    centres = auto_place_carrots(
+        count=cfg.carrot.count,
+        axis=cfg.carrot.axis,
+        anchor=cfg.carrot.position,
+        diameter_m=cfg.carrot.diameter_m,
+        length_m=cfg.carrot.length_m,
+        inner_radius=inner_radius,
+        base_thickness=cfg.pot.base_thickness_m,
+        water_top_z=water_top_z,
+    )
+    c_pts_per_instance = [
+        _orient_and_translate_carrot(c_pts, cfg.carrot.axis, cfg.carrot.length_m, centre)
+        for centre in centres
+    ]
+    print(
+        f"  carrot:      {len(c_pts):,} verts, {len(c_tets):,} tets, "
+        f"{len(c_tris):,} surface tris × {len(centres)} instance(s)"
+    )
     print(f"  mesh build:  {time.perf_counter()-t0:.2f}s")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    export_scene_usd(args.output, pot_mesh, water_mesh, c_pts_world, c_tris)
+    export_scene_usd(args.output, pot_mesh, water_mesh, c_pts_per_instance, c_tris)
     print(f"USD scene written: {args.output.resolve()}")
     return 0
+
+
+def _orient_and_translate_carrot(
+    canonical_pts: np.ndarray,
+    axis: str,
+    length_m: float,
+    centre: tuple[float, float, float],
+) -> np.ndarray:
+    """Apply axis-aware orientation + translation to one carrot mesh.
+
+    The canonical mesh is a vertical cylinder anchored at origin extending
+    +z by ``length_m``. The runtime kernel interprets ``centre`` as:
+      * axis="z" → base of the cylinder; cylinder extends [cz, cz+L].
+      * axis="x" / "y" → centre of the cylinder; cylinder extends ±L/2.
+
+    We mirror that in mesh space so the USD export matches the rasterized
+    physics geometry.
+    """
+    pts = canonical_pts.copy()
+    if axis == "z":
+        # Legacy: anchor is the base; canonical mesh already extends +z
+        # from origin, so just translate.
+        return translate_points(pts, centre)
+    # Horizontal: rotate so cylinder axis aligns with +x or +y, then
+    # shift so the cylinder's midpoint sits at ``centre``.
+    half = length_m / 2.0
+    pts[:, 2] -= half  # centre cylinder on origin in z (range [-L/2, +L/2])
+    if axis == "x":
+        # Map (x, y, z) → (z, y, -x): rotate about +y by +90°.
+        rotated = np.column_stack([pts[:, 2], pts[:, 1], -pts[:, 0]]).astype(pts.dtype)
+    else:  # axis == "y"
+        # Map (x, y, z) → (x, z, -y): rotate about +x by -90°.
+        rotated = np.column_stack([pts[:, 0], pts[:, 2], -pts[:, 1]]).astype(pts.dtype)
+    return translate_points(rotated, centre)
 
 
 if __name__ == "__main__":

@@ -1,12 +1,30 @@
-# Default scenario: real-world household cooking on a steel 304 saucepan.
-# 20 cm dia x 12 cm tall (~3-quart), 2.5 L water, ~2.5 kW residential burner
-# (80 kW/m^2 over the pot base), nucleate boiling enabled, 15-minute window
-# (boil-up reached ~6-8 min, then steady boil for ~7 min).
+# Default scenario: realistic kitchen stew on a steel 304 saucepan.
+# 20 cm dia x 12 cm tall (~3-quart), 2.5 L water, ~2.5 kW residential
+# burner (80 kW/m^2 over the pot base). 3 carrots + 2 potatoes + 1 onion
+# (~173 g of veg) for a normal small-soup ratio, with vitamin-C-protects-
+# beta-carotene coupling (Sakai 1987) so the dashboard's main view shows
+# every M1-M5 feature out of the box.
 #
-# Phase 3, 4, 6 (run_boiling.py / run_retention.py / run_dashboard.py) consume
-# this config as-is (boiling.enabled honoured). Phase 2 (run_heating.py)
-# overrides cfg.boiling.enabled = False so the single-phase reference remains
-# apples-to-apples with the lumped-capacitance ODE.
+# Schema: the new clean ``ingredients[]`` form. Each ingredient declares
+# its geometry inline plus a ``nutrients:`` dict keyed by nutrient name
+# (max 2 per ingredient -- the current solute-slot infrastructure cap).
+# The first nutrient key becomes the ingredient's primary slot; the
+# second becomes its secondary slot. Couplings reference nutrients by
+# fully-qualified ``ingredient.nutrient`` identifiers.
+#
+# Run with:
+#   python scripts/run_dashboard.py --config configs/scenarios/default.yaml
+#
+# Phase 3, 4, 6 (run_boiling.py / run_retention.py / run_dashboard.py)
+# consume this config as-is. Phase 2 (run_heating.py) overrides
+# cfg.boiling.enabled = False for its single-phase reference run.
+#
+# Literature citations for the nutrient kinetics + coupling:
+#   * Ordonez-Santos 2020, Int J Food Sci Tech 55: 201
+#       (beta-carotene Ea ~ 60 kJ/mol; vitamin C Ea ~ 41 kJ/mol)
+#   * Sakai 1987, J Food Process Preserv 11: 197
+#       (coupled AA + beta-carotene oxidation kinetics)
+
 pot:
   diameter_m: 0.20
   height_m: 0.12
@@ -18,55 +36,112 @@ water:
   fill_fraction: 0.75
   initial_temp_c: 20.0
 
-carrot:
-  # Realistic stew: 3 carrots laying flat in the pot (axis=x), each
-  # ~60 mm long × 25 mm diameter ≈ 30 g, total ~92 g.
-  count: 3
-  axis: x
-  diameter_m: 0.025
-  length_m: 0.060
-  # Anchor is the centroid of the 3-carrot stack; auto-placement
-  # spreads instances perpendicular to the axis (so along y).
-  position: [0.0, 0.0, 0.040]
-  initial_beta_carotene_mg_per_100g: 8.3
+ingredients:
+  # Ingredient 0: 3 carrots laying flat (axis=x), each ~30 g -> ~92 g total.
+  - name: carrot
+    count: 3
+    axis: x
+    diameter_m: 0.025
+    length_m: 0.060
+    position: [0.0, 0.0, 0.040]
+    density_kg_per_m3: 1040
+    nutrients:
+      # Primary nutrient. Listed first -> internal "primary" solute slot.
+      beta_carotene:
+        enabled: false                # set true to activate degradation physics
+        E_a_kJ_per_mol: 60.0          # Ordonez-Santos 2020
+        k0_per_s: 2.63e6
+        D_eff_m2_per_s: 2.0e-10
+        K_partition: 1.0e-5           # very poorly water-soluble
+        C0_mg_per_kg: 83.0            # ~8.3 mg / 100 g raw carrot
+        C_water_sat_mg_per_kg: 6.0e-3 # aqueous saturation at 100 C
+      # Secondary nutrient. Listed second -> internal "secondary" slot.
+      vitamin_c:
+        enabled: false
+        E_a_kJ_per_mol: 41.0          # Ordonez-Santos 2020
+        k0_per_s: 1.0e3
+        D_eff_m2_per_s: 1.0e-9
+        K_partition: 1.0              # readily partitions into water
+        C0_mg_per_kg: 60.0            # ~6 mg / 100 g raw carrot
+        C_water_sat_mg_per_kg: 1.0e3
+
+  # Ingredient 1: 2 potato pieces. Starch leaches more readily than
+  # beta-carotene (higher K_partition); over the run window potato
+  # retention drops noticeably faster than carrot.
+  - name: potato
+    count: 2
+    axis: x
+    diameter_m: 0.030
+    length_m: 0.040
+    position: [0.0, -0.050, 0.025]
+    density_kg_per_m3: 1080
+    nutrients:
+      starch:
+        enabled: false
+        E_a_kJ_per_mol: 50.0          # starch hydrolysis is faster than carotenoid breakdown
+        k0_per_s: 1.0e5
+        D_eff_m2_per_s: 5.0e-10       # potato cell wall is more permeable
+        K_partition: 0.5              # starch is much more water-soluble
+        C0_mg_per_kg: 200.0e3         # raw potato is ~20 % starch by mass
+        C_water_sat_mg_per_kg: 200.0e3
+
+  # Ingredient 2: 1 small onion standing upright. Volatile sulfur
+  # compounds: moderate K_partition, high diffusivity.
+  - name: onion
+    count: 1
+    axis: z
+    diameter_m: 0.030
+    length_m: 0.030
+    position: [0.040, 0.040, 0.020]
+    density_kg_per_m3: 950
+    nutrients:
+      sulfides:
+        enabled: false
+        E_a_kJ_per_mol: 60.0
+        k0_per_s: 5.0e5
+        D_eff_m2_per_s: 4.0e-10
+        K_partition: 0.1
+        C0_mg_per_kg: 30.0
+        C_water_sat_mg_per_kg: 50.0
+
+# M5: vitamin-C-protects-beta-carotene coupling. Activates only when
+# both nutrients are enabled (toggle the ``enabled`` keys above).
+couplings:
+  - protector: carrot.vitamin_c
+    protected: carrot.beta_carotene
+    enabled: true
+    eta: 0.5                          # 50 % rate reduction at c_ref
+    c_ref_mg_per_kg: 5.0              # cooked-water AA scale
+    eta_max: 0.5                      # cap (literature-backed)
 
 heating:
-  base_heat_flux_w_per_m2: 80000.0  # ~2.5 kW on a 20 cm base -- residential "boil water" setting
+  base_heat_flux_w_per_m2: 80000.0    # ~2.5 kW on a 20 cm base -- residential "boil water" setting
   ambient_temp_c: 22.0
 
 grid:
   # Development tier (1mm): fast iteration, ~5M cells, ~6 GB VRAM
   # Production tier (0.5mm): validation runs, ~38M cells, ~35 GB VRAM
-  dx_m: 0.001  # start with development tier
-  carrot_mesh_resolution: 40  # ~40k tets for dev, 80 for ~200k production
+  dx_m: 0.001                         # start with development tier
+  carrot_mesh_resolution: 40          # ~40k tets for dev, 80 for ~200k production
 
 solver:
-  cfl_safety_factor: 0.4           # multiplier on CFL-limited dt
-  max_dt_s: 0.1                    # hard cap on dt regardless of CFL
-  pressure_tol: 1.0e-5             # Jacobi/CG convergence on Poisson solve
+  cfl_safety_factor: 0.4              # multiplier on CFL-limited dt
+  max_dt_s: 0.1                       # hard cap on dt regardless of CFL
+  pressure_tol: 1.0e-5                # Jacobi/CG convergence on Poisson solve
   pressure_max_iter: 200
-  diffusion_tol: 1.0e-4             # Jacobi/CG convergence on implicit diffusion
+  diffusion_tol: 1.0e-4               # Jacobi/CG convergence on implicit diffusion
   diffusion_max_iter: 50
-  h_conv_outer_w_per_m2_k: 10.0    # Newton cooling coefficient on outer pot wall
+  h_conv_outer_w_per_m2_k: 10.0       # Newton cooling coefficient on outer pot wall
 
 boiling:
-  enabled: true                    # real cooking has nucleate boiling once the wall crosses T_sat
-  dT_onb_k: 5.0                    # wall superheat threshold for nucleation onset
-  contact_angle_rad: 1.0           # water on steel ≈ 0.7–1.4 rad
-  max_bubbles: 100000              # 100k for dev (dx=2mm), 1M for production (dx=0.5mm)
-  initial_bubble_radius_m: 1.0e-5  # 10 µm typical cavity mouth
+  enabled: true                       # real cooking has nucleate boiling once the wall crosses T_sat
+  dT_onb_k: 5.0                       # wall superheat threshold for nucleation onset
+  contact_angle_rad: 1.0              # water on steel ~ 0.7-1.4 rad
+  max_bubbles: 100000                 # 100k for dev (dx=2mm), 1M for production (dx=0.5mm)
+  initial_bubble_radius_m: 1.0e-5     # 10 um typical cavity mouth
   nucleation_probability_per_step: 0.1
-  C_sf_rohsenow: 0.013             # water on stainless steel
+  C_sf_rohsenow: 0.013                # water on stainless steel
   Pr_n_rohsenow: 1.0
 
-nutrient:
-  enabled: false                   # Phase 4: set true to activate carrot beta-carotene physics
-  E_a_kJ_per_mol: 70.0             # Arrhenius activation energy
-  k0_per_s: 2.63e6                 # pre-exponential factor
-  D_eff_m2_per_s: 2.0e-10          # effective diffusivity in carrot tissue
-  K_partition: 1.0e-5              # bare beta-carotene in pure water (Treszczanowicz 1998 range 1e-4..1e-6)
-  C0_mg_per_kg: 83.0               # initial beta-carotene loading (mg / kg carrot)
-  C_water_sat_mg_per_kg: 6.0e-3    # aqueous solubility of beta-carotene at ~100 C (~6 ug/L)
-
-total_time_s: 900.0  # 15 min: boil-up ~6-8 min + steady boil ~7 min
+total_time_s: 900.0                   # 15 min: boil-up ~6-8 min + steady boil ~7 min
 output_every_s: 0.1

@@ -75,18 +75,21 @@ _MAT_CARROT = 3
 @wp.kernel
 def init_carrot_concentration(
     C: wp.array3d(dtype=float),
-    mat: wp.array3d(dtype=int),
+    ingredient_id: wp.array3d(dtype=int),
     C0: float,
-    mat_carrot: int,
+    this_ingredient_id_value: int,   # 1 + ingredient index (0-based)
 ):
-    """Set ``C = C0`` on every carrot cell, ``C = 0`` everywhere else.
+    """Set ``C = C0`` on every cell that belongs to *this* ingredient
+    (i.e. ``ingredient_id == this_ingredient_id_value``); zero
+    elsewhere. M4-extended: each slot has its own ``C`` field, so cells
+    outside this ingredient stay at 0 in this slot's view.
 
-    Launched over the full (nx, ny, nz) domain at geometry-build time when
-    ``cfg.nutrient.enabled``. The water-side passive scalar ``C_water``
-    (allocated in Milestone C) starts at zero regardless.
+    For single-ingredient scenarios ``this_ingredient_id_value == 1``
+    matches the legacy ``mat == MAT_CARROT`` voxel set, so behaviour is
+    bit-identical to the pre-M4 path.
     """
     i, j, k = wp.tid()
-    if mat[i, j, k] == mat_carrot:
+    if ingredient_id[i, j, k] == this_ingredient_id_value:
         C[i, j, k] = C0
     else:
         C[i, j, k] = 0.0
@@ -153,24 +156,26 @@ def allocate_nutrient_workspace(
 def arrhenius_degrade(
     C: wp.array3d(dtype=float),
     T: wp.array3d(dtype=float),
-    mat: wp.array3d(dtype=int),
+    ingredient_id: wp.array3d(dtype=int),
     k0: float,
     E_a_over_R: float,
     dt: float,
-    mat_carrot: int,
+    this_ingredient_id_value: int,
 ):
-    """Apply exact-integration Arrhenius first-order decay on carrot cells.
+    """Exact-integration Arrhenius first-order decay on this ingredient's
+    cells.
 
     Per-cell update: ``C *= exp(-k(T)*dt)`` with ``k(T) = k0*exp(-E_a/(R*T))``.
-    The exact-integration form is unconditionally stable regardless of dt, so
-    the reaction term never constrains the global timestep (which stays
-    bounded by advection CFL per the Phase-3 pattern).
+    The exact-integration form is unconditionally stable regardless of dt.
 
-    Non-carrot cells are skipped (C is already 0 there from init; degradation
-    on C=0 is a no-op but we guard anyway).
+    M4-extended: gates on ``ingredient_id == this_ingredient_id_value``
+    (1-based) instead of the global ``mat == MAT_CARROT``. For
+    single-ingredient scenarios both gates select the same cell set;
+    multi-ingredient scenarios get per-ingredient kinetics with each
+    slot only modifying its own ingredient's voxels.
     """
     i, j, k = wp.tid()
-    if mat[i, j, k] != mat_carrot:
+    if ingredient_id[i, j, k] != this_ingredient_id_value:
         return
     T_k = T[i, j, k]
     if T_k <= 0.0:
@@ -223,14 +228,18 @@ def initialize_nutrient_field(
     device: str = "cuda:0",
     target_C: Any = None,
     C0_override: float | None = None,
+    ingredient_idx: int = 0,
 ) -> None:
-    """Populate a concentration array from C0 on carrot cells.
+    """Populate a concentration array from C0 on this ingredient's cells.
 
-    By default targets ``grid.C`` and uses ``cfg.nutrient.C0_mg_per_kg`` --
-    preserving the single-solute contract. For the dual-solute extension
-    pass ``target_C=grid.C2`` and ``C0_override=cfg.nutrient2.C0_mg_per_kg``
-    to populate the secondary field. Called from
-    :func:`geometry.build_pot_geometry`.
+    By default targets ``grid.C`` (legacy carrot's primary slot) and
+    uses ``cfg.nutrient.C0_mg_per_kg``. M4-extended callers pass
+    ``ingredient_idx`` so each per-ingredient slot's C field starts at
+    C0 only on its own ingredient's voxels and 0 everywhere else.
+
+    For the legacy dual-solute extension pass ``target_C=grid.C2`` and
+    ``C0_override=cfg.nutrient2.C0_mg_per_kg`` to populate the secondary
+    field.
     """
     C_arr = target_C if target_C is not None else grid.C
     if C_arr is None:
@@ -243,7 +252,7 @@ def initialize_nutrient_field(
     wp.launch(
         init_carrot_concentration,
         dim=(nx, ny, nz),
-        inputs=[C_arr, grid.mat, C0, _MAT_CARROT],
+        inputs=[C_arr, grid.ingredient_id, C0, ingredient_idx + 1],
         device=device,
     )
 
@@ -269,18 +278,19 @@ def step_degrade(
     E_a_j_per_mol = cfg.nutrient.E_a_kJ_per_mol * 1000.0
     E_a_over_R = E_a_j_per_mol / _R_GAS
 
-    # Carrot-side primary reservoir.
+    # Carrot-side primary reservoir. Legacy helper: gates on ingredient
+    # 0 (the legacy carrot, ingredient_id == 1).
     wp.launch(
         arrhenius_degrade,
         dim=(nx, ny, nz),
         inputs=[
             grid.C,
             grid.T,
-            grid.mat,
+            grid.ingredient_id,
             cfg.nutrient.k0_per_s,
             E_a_over_R,
             dt,
-            _MAT_CARROT,
+            1,   # this_ingredient_id_value (legacy carrot)
         ],
         device=device,
     )
@@ -385,32 +395,30 @@ def water_pool_fraction(grid: "Grid", cfg: "ScenarioConfig") -> float:
 def diffuse_nutrient_explicit(
     C_in: wp.array3d(dtype=float),
     C_out: wp.array3d(dtype=float),
-    mat: wp.array3d(dtype=int),
+    ingredient_id: wp.array3d(dtype=int),
     D_eff: float,
     dx: float,
     dt: float,
-    mat_carrot: int,
+    this_ingredient_id_value: int,
 ):
-    """Explicit 7-point Laplacian update with zero-flux Neumann BC at the
-    carrot surface.
+    """Explicit 7-point Laplacian update with zero-flux Neumann BC at this
+    ingredient's surface.
 
-        C_new = C + (D_eff*dt / dx^2) * Sum_{neighbour in carrot}(C_n - C)
+        C_new = C + (D_eff*dt / dx^2) * Sum_{neighbour in this ingredient}(C_n - C)
 
-    Faces to non-carrot cells contribute zero flux -- we simply omit them
-    from the sum, which is equivalent to mirroring the cell's own value on
-    the outside of the boundary. This makes the carrot a closed domain for
-    diffusion: mass is conserved inside until Milestone C's leaching kernel
-    opens the surface.
+    M4-extended: faces to cells belonging to *other* ingredients (or to
+    non-ingredient regions) contribute zero flux. Each ingredient's
+    concentration field is therefore closed at its own boundary --
+    carrot doesn't diffuse into potato and vice versa. The leaching
+    kernel is the only mass exchange with the water pool.
 
     Stability: diffusion number <= 1/6 requires
         dt <= dx^2 / (6 * D_eff).
-    At dx = 2 mm and D_eff = 2e-10 m^2/s this is ~6700 s -- always satisfied
-    by the advection-CFL dt that dominates the real pipeline (~ms).
     """
     i, j, k = wp.tid()
 
-    # Non-carrot cells: copy through unchanged (C should already be 0).
-    if mat[i, j, k] != mat_carrot:
+    # Cells outside this ingredient: copy through unchanged.
+    if ingredient_id[i, j, k] != this_ingredient_id_value:
         C_out[i, j, k] = C_in[i, j, k]
         return
 
@@ -418,22 +426,22 @@ def diffuse_nutrient_explicit(
     lap = float(0.0)
 
     # +x
-    if i + 1 < C_in.shape[0] and mat[i + 1, j, k] == mat_carrot:
+    if i + 1 < C_in.shape[0] and ingredient_id[i + 1, j, k] == this_ingredient_id_value:
         lap = lap + (C_in[i + 1, j, k] - c_self)
     # -x
-    if i >= 1 and mat[i - 1, j, k] == mat_carrot:
+    if i >= 1 and ingredient_id[i - 1, j, k] == this_ingredient_id_value:
         lap = lap + (C_in[i - 1, j, k] - c_self)
     # +y
-    if j + 1 < C_in.shape[1] and mat[i, j + 1, k] == mat_carrot:
+    if j + 1 < C_in.shape[1] and ingredient_id[i, j + 1, k] == this_ingredient_id_value:
         lap = lap + (C_in[i, j + 1, k] - c_self)
     # -y
-    if j >= 1 and mat[i, j - 1, k] == mat_carrot:
+    if j >= 1 and ingredient_id[i, j - 1, k] == this_ingredient_id_value:
         lap = lap + (C_in[i, j - 1, k] - c_self)
     # +z
-    if k + 1 < C_in.shape[2] and mat[i, j, k + 1] == mat_carrot:
+    if k + 1 < C_in.shape[2] and ingredient_id[i, j, k + 1] == this_ingredient_id_value:
         lap = lap + (C_in[i, j, k + 1] - c_self)
     # -z
-    if k >= 1 and mat[i, j, k - 1] == mat_carrot:
+    if k >= 1 and ingredient_id[i, j, k - 1] == this_ingredient_id_value:
         lap = lap + (C_in[i, j, k - 1] - c_self)
 
     coeff = D_eff * dt / (dx * dx)
@@ -583,6 +591,7 @@ def leach_at_surface(
     uy: wp.array3d(dtype=float),
     uz: wp.array3d(dtype=float),
     mat: wp.array3d(dtype=int),
+    ingredient_id: wp.array3d(dtype=int),
     dx: float,
     dt: float,
     D_carrot: float,
@@ -591,7 +600,7 @@ def leach_at_surface(
     K_partition: float,
     C_water_sat: float,
     mat_fluid: int,
-    mat_carrot: int,
+    this_ingredient_id_value: int,
 ):
     """Flux-transport solute across carrot-fluid faces with two physical caps.
 
@@ -623,7 +632,10 @@ def leach_at_surface(
     """
     i, j, k = wp.tid()
 
-    if mat[i, j, k] != mat_carrot:
+    # M4-extended: gate on per-ingredient label so each slot only leaches
+    # from its own ingredient's surface. Neighbour fluid cells still
+    # receive the dissolved mass via the same per-solute C_water field.
+    if ingredient_id[i, j, k] != this_ingredient_id_value:
         return
 
     c_self = C[i, j, k]
@@ -992,7 +1004,7 @@ def step_leach(
     """
     if grid.C is None or grid.C_water is None:
         return
-    from .geometry import MAT_CARROT as _MC, MAT_FLUID as _MF
+    from .geometry import MAT_FLUID as _MF
 
     nx, ny, nz = grid.shape
     D_carrot = cfg.carrot.diameter_m
@@ -1006,6 +1018,7 @@ def step_leach(
             grid.uy,
             grid.uz,
             grid.mat,
+            grid.ingredient_id,
             grid.dx,
             dt,
             D_carrot,
@@ -1014,7 +1027,7 @@ def step_leach(
             cfg.nutrient.K_partition,
             cfg.nutrient.C_water_sat_mg_per_kg,
             _MF,
-            _MC,
+            1,  # legacy carrot ingredient_id
         ],
         device=device,
     )
@@ -1055,11 +1068,11 @@ def step_diffuse_nutrient(
         inputs=[
             grid.C,
             ws.C_work,
-            grid.mat,
+            grid.ingredient_id,
             cfg.nutrient.D_eff_m2_per_s,
             grid.dx,
             dt,
-            _MAT_CARROT,
+            1,  # legacy carrot ingredient_id
         ],
         device=device,
     )
@@ -1100,6 +1113,23 @@ class SoluteSlot:
     C_water_tmp: Any
     precipitated_mass: Any
     cfg_nutrient: Any
+    # M4-extended: which ingredient does this slot belong to? 0-based
+    # index into ``cfg.iter_ingredients()``. Kernels gate on
+    # ``ingredient_id == ingredient_idx + 1`` so per-ingredient kinetics
+    # only modify their own ingredient's voxels. ``D_carrot`` (Sherwood
+    # length scale) for this slot's leach kernel comes from the
+    # ingredient's geometry, not the legacy ``cfg.carrot.diameter_m``.
+    ingredient_idx: int = 0
+    D_carrot: float = 0.025
+    # M5: per-step protection multiplier on this slot's effective k0.
+    # 1.0 = no protection (default, independent kinetics). When a
+    # NutrientCouplingConfig declares this slot as ``protected``, the
+    # pipeline overwrites this value before each degrade-kernel launch
+    # using ``protection_factor = max(1 - eta * c_protector / c_ref,
+    # 1 - eta_max)``. The pipeline resets it to 1.0 for the next step
+    # so coupling effects are recomputed from fresh water-side
+    # concentrations.
+    rate_multiplier: float = 1.0
 
 
 def make_primary_slot(
@@ -1108,7 +1138,8 @@ def make_primary_slot(
     ws: NutrientWorkspace,
 ) -> SoluteSlot:
     """Build the primary :class:`SoluteSlot` from ``grid.C``/``grid.C_water``,
-    the existing workspace scratch buffers, and ``cfg.nutrient``."""
+    the existing workspace scratch buffers, and ``cfg.nutrient``. Pinned to
+    ingredient 0 (legacy carrot)."""
     return SoluteSlot(
         C=grid.C,
         C_water=grid.C_water,
@@ -1116,7 +1147,69 @@ def make_primary_slot(
         C_water_tmp=ws.C_water_tmp,
         precipitated_mass=ws.precipitated_mass,
         cfg_nutrient=cfg.nutrient,
+        ingredient_idx=0,
+        D_carrot=cfg.carrot.diameter_m,
     )
+
+
+def _allocate_ingredient_slot(
+    grid: "Grid",
+    cfg: "ScenarioConfig",
+    extra: Any,
+    ingredient_idx: int,
+    device: str = "cuda:0",
+) -> list[SoluteSlot]:
+    """M4-extended + M8: allocate dedicated C / C_water / scratch arrays
+    for one extra ingredient and return its full list of solute slots.
+
+    Each extra ingredient ``cfg.extra_ingredients[ingredient_idx-1]``
+    carries:
+      * ``nutrient``  -- always present, "primary" slot
+      * ``nutrient2`` -- optional "secondary" slot
+      * ``extra_nutrients`` -- M8: any number of additional nutrients
+
+    Returns a flat list of ``SoluteSlot`` instances (one per enabled
+    nutrient, in the order: primary, secondary, then ``extra_nutrients``
+    in declared order). Empty list when the extra has no enabled
+    nutrient.
+    """
+    if not extra.nutrient.enabled:
+        return []
+    nx, ny, nz = grid.shape
+
+    def _make_slot(cfg_nut: Any) -> SoluteSlot:
+        """Allocate one SoluteSlot worth of arrays + initialize C
+        from this nutrient's C0 on this ingredient's voxels."""
+        C = wp.zeros((nx, ny, nz), dtype=float, device=device)
+        C_water = wp.zeros((nx, ny, nz), dtype=float, device=device)
+        C_work = wp.zeros((nx, ny, nz), dtype=float, device=device)
+        C_water_tmp = wp.zeros((nx, ny, nz), dtype=float, device=device)
+        precipitated_mass = wp.zeros(1, dtype=float, device=device)
+        initialize_nutrient_field(
+            grid, cfg, device=device,
+            target_C=C,
+            C0_override=cfg_nut.C0_mg_per_kg,
+            ingredient_idx=ingredient_idx,
+        )
+        return SoluteSlot(
+            C=C,
+            C_water=C_water,
+            C_work=C_work,
+            C_water_tmp=C_water_tmp,
+            precipitated_mass=precipitated_mass,
+            cfg_nutrient=cfg_nut,
+            ingredient_idx=ingredient_idx,
+            D_carrot=extra.diameter_m,
+        )
+
+    slots: list[SoluteSlot] = [_make_slot(extra.nutrient)]
+    if extra.nutrient2.enabled:
+        slots.append(_make_slot(extra.nutrient2))
+    # M8: any further nutrients beyond the legacy pair.
+    for nut in extra.extra_nutrients:
+        if nut.enabled:
+            slots.append(_make_slot(nut))
+    return slots
 
 
 def make_secondary_slot(
@@ -1125,7 +1218,8 @@ def make_secondary_slot(
     ws: NutrientWorkspace,
 ) -> SoluteSlot:
     """Build the secondary :class:`SoluteSlot` from ``grid.C2``/``grid.C_water2``
-    and the secondary scratch buffers on the workspace."""
+    and the secondary scratch buffers on the workspace. Also pinned to
+    ingredient 0 (legacy carrot's secondary nutrient)."""
     return SoluteSlot(
         C=grid.C2,
         C_water=grid.C_water2,
@@ -1133,6 +1227,8 @@ def make_secondary_slot(
         C_water_tmp=ws.C_water_tmp2,
         precipitated_mass=ws.precipitated_mass2,
         cfg_nutrient=cfg.nutrient2,
+        ingredient_idx=0,
+        D_carrot=cfg.carrot.diameter_m,
     )
 
 
@@ -1144,11 +1240,13 @@ def _step_reaction_diffusion_leach(
     device: str = "cuda:0",
 ) -> None:
     """Arrhenius degrade (carrot + water) + in-carrot diffusion + Sherwood leach
-    for a single solute slot. Same sequence as the single-solute pipeline's
-    ``step_degrade + step_diffuse_nutrient + step_leach``, but reading from
-    ``slot.*`` instead of the hard-coded primary arrays/cfg. ``D_carrot`` is
-    ``cfg.carrot.diameter_m`` -- the shared geometry length scale that both
-    solutes' Sherwood correlations use.
+    for a single solute slot.
+
+    M4-extended: each slot is pinned to one ingredient via
+    ``slot.ingredient_idx``; carrot-side kernels gate on
+    ``ingredient_id == slot.ingredient_idx + 1``. The legacy ``D_carrot``
+    parameter is preserved as a hint, but the slot's own ``D_carrot``
+    overrides it so per-ingredient diameters drive Sherwood correctly.
     """
     if slot.C is None:
         return
@@ -1158,15 +1256,28 @@ def _step_reaction_diffusion_leach(
     cfg_n = slot.cfg_nutrient
     E_a_j_per_mol = cfg_n.E_a_kJ_per_mol * 1000.0
     E_a_over_R = E_a_j_per_mol / _R_GAS
+    this_id = slot.ingredient_idx + 1
+    diameter = slot.D_carrot if slot.D_carrot > 0.0 else D_carrot
+    # M5: apply per-step protection multiplier. The pipeline sets
+    # ``slot.rate_multiplier`` from ``NutrientCouplingConfig`` before
+    # each step. Default 1.0 keeps single-coupling-disabled behaviour
+    # bit-identical with the M4-extended baseline.
+    k0_eff = cfg_n.k0_per_s * slot.rate_multiplier
 
-    # --- Arrhenius degrade (carrot) ---
+    # --- Arrhenius degrade (carrot, gated on this ingredient's voxels) ---
     wp.launch(
         arrhenius_degrade,
         dim=(nx, ny, nz),
-        inputs=[slot.C, grid.T, grid.mat, cfg_n.k0_per_s, E_a_over_R, dt, _MAT_CARROT],
+        inputs=[slot.C, grid.T, grid.ingredient_id, k0_eff, E_a_over_R, dt, this_id],
         device=device,
     )
-    # --- Arrhenius degrade (water pool) ---
+    # --- Arrhenius degrade (water pool; ingredient-agnostic gate on MAT_FLUID) ---
+    # The water-side pool degrades at the *un-protected* rate: protection
+    # is a free-radical-scavenging effect that operates inside the
+    # carrot tissue and at its surface, not on already-dissolved
+    # molecules. This matches the Sakai 1987 picture where the AA→βC
+    # protection is mediated by suppressing the carotenoid's exposure
+    # to oxidants in the same membrane / interfacial region.
     if slot.C_water is not None:
         wp.launch(
             arrhenius_degrade_water,
@@ -1186,7 +1297,7 @@ def _step_reaction_diffusion_leach(
     wp.launch(
         diffuse_nutrient_explicit,
         dim=(nx, ny, nz),
-        inputs=[slot.C, slot.C_work, grid.mat, cfg_n.D_eff_m2_per_s, grid.dx, dt, _MAT_CARROT],
+        inputs=[slot.C, slot.C_work, grid.ingredient_id, cfg_n.D_eff_m2_per_s, grid.dx, dt, this_id],
         device=device,
     )
     wp.copy(slot.C, slot.C_work)
@@ -1203,15 +1314,16 @@ def _step_reaction_diffusion_leach(
                 grid.uy,
                 grid.uz,
                 grid.mat,
+                grid.ingredient_id,
                 grid.dx,
                 dt,
-                D_carrot,
+                diameter,
                 cfg_n.nu_water_m2_per_s,
                 cfg_n.D_water_molec_m2_per_s,
                 cfg_n.K_partition,
                 cfg_n.C_water_sat_mg_per_kg,
                 _MF,
-                _MAT_CARROT,
+                this_id,
             ],
             device=device,
         )

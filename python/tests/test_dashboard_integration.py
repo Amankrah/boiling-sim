@@ -147,7 +147,7 @@ def control_server():
 
 @pytest.fixture(scope="module")
 def small_sim() -> Simulation:
-    cfg = load_scenario("configs/scenarios/default.yaml")
+    cfg = load_scenario("configs/scenarios/single_carrot.yaml")
     cfg.nutrient.enabled = True
     cfg.boiling.enabled = True
     cfg.grid.dx_m = 0.004

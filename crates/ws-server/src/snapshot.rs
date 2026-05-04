@@ -65,17 +65,26 @@ use serde::{Deserialize, Serialize};
 /// `Uint8Array` payload as a `Float32Array`. Endianness is fixed at
 /// little-endian — the assumption holds for x86 and ARM hosts.
 ///
-/// **v6** (this — multi-carrot pose): adds carrot pose and quantity
-/// fields so the dashboard can render N cylinders laying flat in the
-/// pot rather than the single hardcoded vertical procedural cylinder.
-/// The aggregate retention scalars (`carrot_retention*`) are unchanged
-/// — per-instance retention is a future feature requiring labelled
-/// cells. New fields: `carrot_count`, `carrot_axis` (0=x, 1=y, 2=z),
-/// `carrot_diameter_m`, `carrot_length_m`, `carrot_centres` (length =
-/// count, world-space anchor per instance), `carrot_total_mass_g`
-/// (derived: count·π·(d/2)²·L·ρ_carrot, displayed live in the Config
-/// page).
-pub const SCHEMA_VERSION: u32 = 6;
+/// **v6** (superseded): adds carrot pose and quantity fields so the
+/// dashboard can render N cylinders laying flat in the pot. Adds
+/// `carrot_count`, `carrot_axis`, `carrot_diameter_m`,
+/// `carrot_length_m`, `carrot_centres`, `carrot_total_mass_g`.
+///
+/// **v7** (superseded): adds `carrot_retention_per_instance` and
+/// `carrot_retention2_per_instance` so the 3D scene can colour each
+/// instance independently.
+///
+/// **v8** (this — multi-ingredient): adds an `ingredients` list
+/// carrying per-ingredient pose (count, axis, diameter, length,
+/// centres) + name + retention. Each entry is one ingredient: the
+/// first is the legacy `cfg.carrot`; extras follow in declared order.
+/// The 3D scene renders each ingredient with a name-driven palette
+/// (carrot=orange, potato=cream, onion=yellow). Per-ingredient
+/// nutrient kinetics are deferred to a future M4-extended; today every
+/// ingredient leaches into the same shared `cfg.nutrient` pool, so the
+/// per-ingredient retention values reflect mass partition rather than
+/// per-molecule kinetics.
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// Errors surfaced by [`Snapshot::from_msgpack_bytes`].
 #[derive(Debug, thiserror::Error)]
@@ -252,6 +261,50 @@ pub struct Snapshot {
     /// and a fixed density (~1040 kg/m³). Displayed live in the Config
     /// page so the user knows "I'm cooking 200 g".
     pub carrot_total_mass_g: f32,
+
+    // -------- v7: per-instance retention --------
+    /// Primary-solute retention per carrot instance (% of the
+    /// initial mass still inside that carrot's voxel mask). Length
+    /// equals `carrot_count` when present; empty when the primary
+    /// nutrient is disabled or `carrot_count == 1` (the aggregate
+    /// `carrot_retention` scalar already covers single-carrot runs).
+    pub carrot_retention_per_instance: Vec<f32>,
+    /// Same as `carrot_retention_per_instance` but for the secondary
+    /// solute. Empty when nutrient2 is disabled or count==1.
+    pub carrot_retention2_per_instance: Vec<f32>,
+
+    // -------- v8: multi-ingredient --------
+    /// Per-ingredient state list. First entry is the legacy
+    /// `cfg.carrot`; subsequent entries come from
+    /// `cfg.extra_ingredients` in declared order. Length equals
+    /// `cfg.n_ingredients` (>= 1).
+    pub ingredients: Vec<IngredientState>,
+}
+
+/// One ingredient's pose + diagnostic snapshot. Mirrors the dict the
+/// Python producer emits in `dashboard._ingredient_states`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct IngredientState {
+    /// Human-readable label ("carrot", "potato", "onion", ...). Drives
+    /// the 3D scene's color palette.
+    pub name: String,
+    /// Number of instances of this ingredient.
+    pub count: u32,
+    /// Cylinder axis: 0=x, 1=y, 2=z.
+    pub axis: u8,
+    pub diameter_m: f32,
+    pub length_m: f32,
+    /// Anchor per instance (length == count). For axis=2 (z), each is
+    /// the cylinder *base*; for axis 0/1, the *centre*.
+    pub centres: Vec<[f32; 3]>,
+    /// Total mass of this ingredient (g).
+    pub total_mass_g: f32,
+    /// Aggregate retention (%) for this ingredient on the primary
+    /// solute. With shared-nutrient kinetics (today), reflects the
+    /// fraction of this ingredient's voxels' mass still in-place.
+    pub retention: f32,
+    /// Same for the secondary solute.
+    pub retention2: f32,
 }
 
 impl Snapshot {
@@ -347,6 +400,25 @@ mod tests {
                 [0.0,  0.030, 0.040],
             ],
             carrot_total_mass_g: 91.9,
+            // v7: 3 carrots, all at 100% retention (fresh).
+            carrot_retention_per_instance: vec![100.0, 100.0, 100.0],
+            carrot_retention2_per_instance: vec![100.0, 100.0, 100.0],
+            // v8: single-ingredient stew matching the legacy carrot.
+            ingredients: vec![IngredientState {
+                name: "carrot".into(),
+                count: 3,
+                axis: 0,
+                diameter_m: 0.025,
+                length_m: 0.060,
+                centres: vec![
+                    [0.0, -0.030, 0.040],
+                    [0.0, 0.000, 0.040],
+                    [0.0, 0.030, 0.040],
+                ],
+                total_mass_g: 91.9,
+                retention: 88.72,
+                retention2: 65.80,
+            }],
         }
     }
 
