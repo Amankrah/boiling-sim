@@ -199,9 +199,13 @@ that.
 u_z += dt · g · β · (T_face − T_ref)            on internal fluid z-faces
 ```
 
-with `β = 2.07e-4 K⁻¹` (water at 25 °C) and `T_ref = water.initial_temp_c`.
-This is the only momentum source in single-phase mode and drives natural
-convection.
+with `β = 7.5e-4 K⁻¹` (water near saturation, `water.beta_100c` from
+[`data/materials.json`](data/materials.json) loaded onto
+[`MaterialProps.beta_100c`](python/boilingsim/thermal.py)) and
+`T_ref = water.initial_temp_c`. This is the only momentum source in
+single-phase mode and drives natural convection. The 25 °C value
+(`water.beta_25c`, ~2.07e-4 K⁻¹) is documentary; using it here would
+under-predict near-saturation buoyancy by ~3.6×.
 
 ### 5.4 Phase 3b — Bubble update (when `boiling.enabled`)
 

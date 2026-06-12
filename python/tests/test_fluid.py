@@ -198,8 +198,9 @@ def test_buoyancy_pushes_warm_cells_upward():
     T_np[:, :, :3] = T_ref + 10.0  # bottom 3 layers are 10 K warmer
     grid.T.assign(T_np)
 
-    # One buoyancy step with a strong β for easy measurement.
-    apply_buoyancy_step(grid, ScenarioConfig(), dt=0.1, beta=2.07e-4, T_ref_k=T_ref)
+    # One buoyancy step with the canonical near-saturation β from materials.json
+    # (the value the production pipeline now uses via props.beta_100c).
+    apply_buoyancy_step(grid, ScenarioConfig(), dt=0.1, beta=7.5e-4, T_ref_k=T_ref)
 
     uz_np = grid.uz.numpy()
     # Check z-faces in the warm region (k=1,2,3)
@@ -207,8 +208,8 @@ def test_buoyancy_pushes_warm_cells_upward():
     assert (warm_faces > 0).all(), (
         f"some warm-region z-faces are not positive: min = {warm_faces.min()}"
     )
-    # Expected magnitude: dt · g · β · ΔT = 0.1 · 9.81 · 2.07e-4 · 10 = 2.03e-3 m/s
-    expected = 0.1 * 9.81 * 2.07e-4 * 10.0
+    # Expected magnitude: dt · g · β · ΔT = 0.1 · 9.81 · 7.5e-4 · 10 = 7.36e-3 m/s
+    expected = 0.1 * 9.81 * 7.5e-4 * 10.0
     assert abs(warm_faces.mean() - expected) < 0.2 * expected, (
         f"buoyancy magnitude off: got {warm_faces.mean():.3e}, expected {expected:.3e}"
     )
@@ -225,7 +226,7 @@ def test_hydrostatic_balance_closed_box():
     ws = allocate_fluid_workspace(grid)
 
     # Zero velocity, uniform T; one buoyancy step keeps uz = 0.
-    apply_buoyancy_step(grid, ScenarioConfig(), dt=0.01, beta=2.07e-4, T_ref_k=293.15)
+    apply_buoyancy_step(grid, ScenarioConfig(), dt=0.01, beta=7.5e-4, T_ref_k=293.15)
     enforce_no_slip(grid)
     max_div = pressure_projection(grid, ws, ScenarioConfig(), dt=0.01, rho=997.0)
 

@@ -232,9 +232,16 @@ class Simulation:
             self._resolved_couplings.append((cc, protector, protected))
 
         # Water-specific constants (Phase 2 uses constant properties).
+        # beta is loaded from data/materials.json at 100 °C (near-saturation)
+        # because the boiling solver runs the buoyancy term in that regime --
+        # the 25 °C value under-predicts natural-convection vigor by ~3.6x.
         self.rho_water = float(self.props.rho[MAT_FLUID])
-        self.beta_water = 2.07e-4  # 1/K near 25 °C (water)
+        self.beta_water = float(self.props.beta_100c)
         self.T_ref_k = cfg.water.initial_temp_c + 273.15
+        # Sherwood kinematic viscosity from materials.json (mu_100c / rho_l_100c).
+        # Passed as nu_water_override into the leach kernel so explicit YAML
+        # overrides (cfg.nutrient.nu_water_m2_per_s != None) still win when set.
+        self.nu_water_100c = float(self.props.nu_water_100c)
 
         # Precompute host-side masks for diagnostics (avoid GPU→CPU roundtrip each step).
         self._mat_host = self.grid.mat.numpy()
@@ -535,7 +542,7 @@ class Simulation:
             from .boiling import step_bubbles
             with self._profile_phase("step_bubbles"):
                 step_bubbles(
-                    self.grid, self.grid.bubbles, self.cfg, dt,
+                    self.grid, self.grid.bubbles, self.cfg, self.props, dt,
                     sim_time=self.t, step_count=self.step_count, device=self.device,
                 )
 
@@ -576,11 +583,13 @@ class Simulation:
                 self._apply_couplings()
             with self._profile_phase("nutrient_react_diff_leach"):
                 _step_reaction_diffusion_leach(
-                    self.primary_slot, self.grid, D_carrot, dt, device=self.device,
+                    self.primary_slot, self.grid, D_carrot, dt,
+                    nu_water_override=self.nu_water_100c, device=self.device,
                 )
                 if self.secondary_slot is not None:
                     _step_reaction_diffusion_leach(
-                        self.secondary_slot, self.grid, D_carrot, dt, device=self.device,
+                        self.secondary_slot, self.grid, D_carrot, dt,
+                        nu_water_override=self.nu_water_100c, device=self.device,
                     )
                 # M4-extended + M8: each extra ingredient's slots pump
                 # independently through the standard reaction-diffusion-
@@ -590,7 +599,7 @@ class Simulation:
                     for slot in slots_for_extra:
                         _step_reaction_diffusion_leach(
                             slot, self.grid, slot.D_carrot, dt,
-                            device=self.device,
+                            nu_water_override=self.nu_water_100c, device=self.device,
                         )
 
         # 5. No-slip on solid faces before projection.

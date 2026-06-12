@@ -103,7 +103,10 @@ def main() -> int:
     # will kick in once plume starts moving.
     dt_thermal = 0.5 * compute_max_dt_conduction(props, dx)
     dt = min(dt_thermal, 0.1)
-    beta = 2.07e-4  # water near 25°C
+    # Source of truth: data/materials.json -> water.beta_100c, loaded into
+    # MaterialProps. Avoid hardcoding here so this debug script tracks the
+    # production pipeline (pipeline.py uses props.beta_100c).
+    beta = float(props.beta_100c)
     print(f"step dt = {dt*1000:.2f} ms; running {args.steps} steps "
           f"(t_final = {args.steps*dt:.2f} s)")
 

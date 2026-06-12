@@ -46,6 +46,12 @@ class MaterialProps:
 
     Arrays have length 4, ordered [fluid, pot_wall, air, carrot] matching the
     MAT_* constants. All units SI: kg/m³, J/(kg·K), W/(m·K).
+
+    Scalar water fields below carry the saturation / hot-state values used by
+    the boiling solver (Boussinesq, bubble nucleation, Sherwood mass transfer).
+    Loaded from ``data/materials.json`` so the JSON is the source of truth.
+    Liquid water rho/c_p/k for the conduction array stay at the 25 °C
+    reference (``rho_ref``); 100 °C variants live in ``rho_l_100c`` etc.
     """
 
     rho: np.ndarray
@@ -54,6 +60,24 @@ class MaterialProps:
     rho_wp: wp.array
     cp_wp: wp.array
     k_wp: wp.array
+    # Saturation / hot-state water scalars (Boussinesq, boiling kernels).
+    T_sat_k: float = 373.15
+    rho_l_100c: float = 957.8
+    rho_v: float = 0.598
+    h_lv: float = 2.257e6
+    sigma: float = 0.0589
+    beta_100c: float = 7.5e-4
+    mu_100c: float = 2.81e-4
+    g: float = 9.81
+
+    @property
+    def nu_water_100c(self) -> float:
+        """Kinematic viscosity of water at ~100 °C (Sherwood path).
+
+        Derived from JSON ``water.mu_100c`` and ``water.rho_l_100c`` so the
+        Sherwood ``nu_water`` parameter has a single, traceable source of truth.
+        """
+        return self.mu_100c / self.rho_l_100c
 
     @classmethod
     def from_scenario(
@@ -74,6 +98,7 @@ class MaterialProps:
         water = data["water"]
         pot = data[cfg.pot.material]
         carrot = data["carrot"]
+        constants = data["constants"]
 
         # Air values: dry-air at 25°C, 1 atm.
         air_rho = 1.184
@@ -89,6 +114,14 @@ class MaterialProps:
             rho_wp=wp.array(rho, dtype=float, device=device),
             cp_wp=wp.array(c_p, dtype=float, device=device),
             k_wp=wp.array(k, dtype=float, device=device),
+            T_sat_k=float(water["T_sat"]),
+            rho_l_100c=float(water["rho_l_100c"]),
+            rho_v=float(water["rho_vapor"]),
+            h_lv=float(water["h_lv"]),
+            sigma=float(water["sigma"]),
+            beta_100c=float(water["beta_100c"]),
+            mu_100c=float(water["mu_100c"]),
+            g=float(constants["g"]),
         )
 
 
@@ -660,8 +693,10 @@ def conduct_one_step(
         h_inner = cfg.pot.height_m - cfg.pot.base_thickness_m
         water_line_z = cfg.pot.base_thickness_m + cfg.water.fill_fraction * h_inner
         q_evap = 0.1 * cfg.heating.base_heat_flux_w_per_m2
+        # T_onset is a Phase-2 placeholder (linear ramp 85 C -> T_sat);
+        # T_sat itself comes from materials.json via props.
         T_onset_k = 85.0 + 273.15
-        T_sat_k = 100.0 + 273.15
+        T_sat_k = props.T_sat_k
         wp.launch(
             apply_evaporative_cooling,
             dim=(nx, ny, nz),
@@ -677,7 +712,7 @@ def conduct_one_step(
         # wall-boiling kernel saturates -- a BC artefact that overshoots
         # Arrhenius degradation rates in the carrot by ~2x. The bleed pins
         # T_water near T_sat + 0.1 K at steady state.
-        T_sat_k = 100.0 + 273.15
+        T_sat_k = props.T_sat_k
         h_evap = cfg.solver.h_evap_free_surface_w_per_m2_k
         wp.launch(
             apply_free_surface_evap_sink,

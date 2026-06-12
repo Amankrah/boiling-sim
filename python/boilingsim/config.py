@@ -371,9 +371,15 @@ class NutrientConfig(BaseModel):
         description="Initial beta-carotene concentration in carrot cells (mg per kg carrot tissue).",
     )
     # --- Milestone C (Sherwood leaching) water-side transport properties ---
-    nu_water_m2_per_s: float = Field(
-        2.94e-7, gt=0.0,
-        description="Kinematic viscosity of water at ~100 C, for Reynolds number.",
+    nu_water_m2_per_s: float | None = Field(
+        default=None,
+        description="Kinematic viscosity of water for the Sherwood Reynolds number. "
+                    "When None (default), the pipeline derives nu from "
+                    "data/materials.json as mu_100c / rho_l_100c (~2.93e-7 m^2/s at "
+                    "saturation). Set explicitly only to model a non-water "
+                    "continuous phase (e.g. an oil broth) where the JSON-derived "
+                    "value would be wrong; explicit values bypass the materials.json "
+                    "override and propagate straight into the leach kernel.",
     )
     D_water_molec_m2_per_s: float = Field(
         1.0e-9, gt=0.0,

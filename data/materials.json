@@ -1,21 +1,27 @@
 {
   "water": {
     "rho_ref": 997.0,  // reference liquid density (~25 °C)
+    "rho_l_100c": 957.8,  // saturated liquid density at 100 °C; pair with mu_100c for Sherwood ν
     "c_p": 4186.0,  // specific heat at constant pressure
     "k": 0.606,  // thermal conductivity
-    "mu": 0.00089,  // dynamic viscosity
-    "sigma": 0.0589,  // liquid–vapor surface tension
-    "beta": 0.000207,  // thermal expansion (buoyancy)
+    "mu_25c": 0.00089,  // documentary 25 °C dynamic viscosity
+    "mu_100c": 0.000281,  // dynamic viscosity at 100 °C; canonical for Sherwood ν = mu/rho
+    "sigma": 0.0589,  // liquid–vapor surface tension at saturation
+    "beta_25c": 0.000207,  // documentary 25 °C thermal expansion
+    "beta_100c": 0.00075,  // near-saturation thermal expansion; canonical for Boussinesq buoyancy in the boiling regime
     "T_sat": 373.15,  // saturation temperature at 1 atm (boiling point)
     "h_lv": 2.257e6,  // latent heat of vaporization
     "rho_vapor": 0.598,  // saturated vapor density
     "_units": {
-      "rho_ref": "kg/m3 at 25C",
+      "rho_ref": "kg/m3 at 25C (documentary; canonical liquid density for thermal conduction array)",
+      "rho_l_100c": "kg/m3 at ~100C (canonical for Sherwood nu = mu_100c / rho_l_100c)",
       "c_p": "J/(kg*K)",
       "k": "W/(m*K)",
-      "mu": "Pa*s",
+      "mu_25c": "Pa*s at 25C (documentary)",
+      "mu_100c": "Pa*s at ~100C (canonical for Sherwood nu)",
       "sigma": "N/m at 100C",
-      "beta": "1/K near 25C (rises to 7.5e-4 near 100C)",
+      "beta_25c": "1/K near 25C (documentary)",
+      "beta_100c": "1/K near 100C, near-saturation (canonical for Boussinesq buoyancy in the boiling solver)",
       "T_sat": "K (100C)",
       "h_lv": "J/kg",
       "rho_vapor": "kg/m3 at 100C"
@@ -34,7 +40,12 @@
   "cast_iron": {
     "rho": 7200.0,  // mass density
     "c_p": 460.0,  // specific heat
-    "k": 55.0  // thermal conductivity
+    "k": 55.0,  // thermal conductivity
+    "_units": {
+      "rho": "kg/m3",
+      "c_p": "J/(kg*K)",
+      "k": "W/(m*K)"
+    }
   },
   "aluminum": {
     "rho": 2700.0,  // mass density
@@ -51,7 +62,7 @@
     "c_p": 3900.0,  // specific heat
     "k": 0.605,  // thermal conductivity
     "D_beta_carotene": 2.0e-10,  // beta-carotene diffusion in tissue
-    "K_partition": 0.3,  // partition coefficient
+    "K_partition": 1.0e-5,  // partition coefficient for bare beta-carotene in pure water (Treszczanowicz 1998)
     "initial_C_mg_per_kg": 83.0,  // initial beta-carotene concentration
     "Ea_J_per_mol": 70000.0,  // Arrhenius activation energy
     "k0_per_s": 2.63e6,  // Arrhenius pre-exponential factor
@@ -60,7 +71,7 @@
       "c_p": "J/(kg*K)",
       "k": "W/(m*K)",
       "D_beta_carotene": "m2/s",
-      "K_partition": "dimensionless",
+      "K_partition": "dimensionless; default is bare carotenoid in pure water. Scenarios override per solute: ~0.007 for an oil/emulsion phase, 0.5-2.0 for water-soluble vitamins (C, folate). Every YAML in configs/scenarios sets this explicitly.",
       "initial_C_mg_per_kg": "mg/kg (= 8.3 mg per 100g)",
       "Ea_J_per_mol": "J/mol (activation energy, range 66-79 kJ/mol)",
       "k0_per_s": "1/s (pre-exponential factor)"

@@ -344,16 +344,22 @@ def _build_leach_scenario(u_mag_mps: float):
 
 def test_sherwood_at_known_re(nut_cfg):
     """Host-side `sherwood_h_m_host` should reproduce the closed-form
-    Sh = 0.683 Re^0.466 Sc^(1/3) with the default water properties."""
-    # Pick a velocity that gives Re ~ 1000 at D_carrot = 25 mm and
-    # nu_water = 2.94e-7 m^2/s. Re = u*D/nu -> u = Re*nu/D = 1000 * 2.94e-7 / 0.025
-    # = 0.01176 m/s.
+    Sh = 0.683 Re^0.466 Sc^(1/3) with the default water properties.
+
+    The Pydantic default for ``nu_water_m2_per_s`` is now ``None`` (the
+    pipeline derives nu from materials.json). ``_resolve_nu_water`` returns
+    the materials.json-derived value when both override and YAML override
+    are absent, so both the closed-form reference computation and
+    ``sherwood_h_m_host`` use the same nu.
+    """
+    from boilingsim.nutrient import _resolve_nu_water
+
+    nu = _resolve_nu_water(nut_cfg.nutrient, override=None)
     D_carrot = nut_cfg.carrot.diameter_m
     target_Re = 1000.0
-    u_mag = target_Re * nut_cfg.nutrient.nu_water_m2_per_s / D_carrot
+    u_mag = target_Re * nu / D_carrot
 
     # Direct closed form (Sc ~ 294 at our defaults -> Sc^(1/3) ~ 6.65)
-    nu = nut_cfg.nutrient.nu_water_m2_per_s
     Dw = nut_cfg.nutrient.D_water_molec_m2_per_s
     Re = u_mag * D_carrot / nu
     Sc = nu / Dw

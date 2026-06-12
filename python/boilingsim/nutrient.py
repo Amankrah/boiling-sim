@@ -49,14 +49,17 @@ was really 'beta-carotene in a vegetable-oil emulsion'.
 from __future__ import annotations
 
 import math
+import pathlib
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import warp as wp
 
+from .json_hash_comments import loads_json_with_hash_comments
+
 if TYPE_CHECKING:
-    from .config import ScenarioConfig
+    from .config import NutrientConfig, ScenarioConfig
     from .geometry import Grid
 
 
@@ -65,6 +68,42 @@ _R_GAS = 8.31446261815324
 
 # Material ID for carrot cells (must match geometry.py).
 _MAT_CARROT = 3
+
+
+# Lazily-cached fallback nu_water derived from data/materials.json
+# (mu_100c / rho_l_100c). Used when a caller does not pass nu_water_override
+# AND the NutrientConfig field is its new None default. Computed once per
+# process. The production pipeline always passes the override, so this path
+# only fires from unit-test helpers (test_nutrient.py) and any caller that
+# bypasses ``Simulation`` while leaving ``cfg.nutrient.nu_water_m2_per_s``
+# unset.
+_DEFAULT_NU_WATER_CACHE: float | None = None
+
+
+def _default_nu_water_from_materials() -> float:
+    """Return ``mu_100c / rho_l_100c`` from ``data/materials.json``."""
+    global _DEFAULT_NU_WATER_CACHE
+    if _DEFAULT_NU_WATER_CACHE is None:
+        path = pathlib.Path(__file__).resolve().parents[2] / "data" / "materials.json"
+        data = loads_json_with_hash_comments(path.read_text(encoding="utf-8"))
+        _DEFAULT_NU_WATER_CACHE = (
+            float(data["water"]["mu_100c"]) / float(data["water"]["rho_l_100c"])
+        )
+    return _DEFAULT_NU_WATER_CACHE
+
+
+def _resolve_nu_water(cfg_n: "NutrientConfig", override: float | None) -> float:
+    """Pick the kinematic viscosity for the Sherwood kernel.
+
+    Priority order: ``override`` (e.g. ``Simulation.nu_water_100c`` derived
+    from ``MaterialProps``), then an explicit ``cfg_n.nu_water_m2_per_s``
+    (YAML override for non-water phases), then the JSON-derived default.
+    """
+    if override is not None:
+        return float(override)
+    if cfg_n.nu_water_m2_per_s is not None:
+        return float(cfg_n.nu_water_m2_per_s)
+    return _default_nu_water_from_materials()
 
 
 # ---------------------------------------------------------------------------
@@ -706,9 +745,14 @@ def sherwood_h_m_host(
     cfg: "ScenarioConfig",
     u_mag: float,
     D_carrot: float,
+    nu_water_override: float | None = None,
 ) -> float:
-    """Host-side Sherwood h_m for unit tests. Same formula as the wp.func."""
-    nu = cfg.nutrient.nu_water_m2_per_s
+    """Host-side Sherwood h_m for unit tests. Same formula as the wp.func.
+
+    Resolves ``nu_water`` through ``_resolve_nu_water`` so the materials.json
+    fallback fires when ``cfg.nutrient.nu_water_m2_per_s is None``.
+    """
+    nu = _resolve_nu_water(cfg.nutrient, nu_water_override)
     Dw = cfg.nutrient.D_water_molec_m2_per_s
     Re = u_mag * D_carrot / nu
     Sc = nu / Dw
@@ -994,6 +1038,7 @@ def step_leach(
     cfg: "ScenarioConfig",
     dt: float,
     device: str = "cuda:0",
+    nu_water_override: float | None = None,
 ) -> None:
     """Advance carrot and water-side concentrations by one Sherwood-flux step.
 
@@ -1001,6 +1046,10 @@ def step_leach(
     when ``cfg.nutrient.enabled``. Reads ``grid.ux/uy/uz`` (current velocity),
     writes both ``grid.C`` (carrot cells) and ``grid.C_water`` (fluid cells
     that touch the carrot surface).
+
+    ``nu_water_override`` follows the same chain as
+    :func:`_step_reaction_diffusion_leach`: explicit override > YAML
+    ``cfg.nutrient.nu_water_m2_per_s`` > materials.json fallback.
     """
     if grid.C is None or grid.C_water is None:
         return
@@ -1008,6 +1057,7 @@ def step_leach(
 
     nx, ny, nz = grid.shape
     D_carrot = cfg.carrot.diameter_m
+    nu_water = _resolve_nu_water(cfg.nutrient, nu_water_override)
     wp.launch(
         leach_at_surface,
         dim=(nx, ny, nz),
@@ -1022,7 +1072,7 @@ def step_leach(
             grid.dx,
             dt,
             D_carrot,
-            cfg.nutrient.nu_water_m2_per_s,
+            nu_water,
             cfg.nutrient.D_water_molec_m2_per_s,
             cfg.nutrient.K_partition,
             cfg.nutrient.C_water_sat_mg_per_kg,
@@ -1238,6 +1288,7 @@ def _step_reaction_diffusion_leach(
     D_carrot: float,
     dt: float,
     device: str = "cuda:0",
+    nu_water_override: float | None = None,
 ) -> None:
     """Arrhenius degrade (carrot + water) + in-carrot diffusion + Sherwood leach
     for a single solute slot.
@@ -1247,6 +1298,12 @@ def _step_reaction_diffusion_leach(
     ``ingredient_id == slot.ingredient_idx + 1``. The legacy ``D_carrot``
     parameter is preserved as a hint, but the slot's own ``D_carrot``
     overrides it so per-ingredient diameters drive Sherwood correctly.
+
+    ``nu_water_override`` (typically ``Simulation.nu_water_100c`` derived
+    from materials.json) takes precedence over the slot's
+    ``cfg_nutrient.nu_water_m2_per_s`` field, which is in turn the YAML
+    override path for non-water continuous phases. When both are unset,
+    falls back to the JSON-derived default via :func:`_resolve_nu_water`.
     """
     if slot.C is None:
         return
@@ -1304,6 +1361,7 @@ def _step_reaction_diffusion_leach(
 
     # --- Sherwood leach ---
     if slot.C_water is not None:
+        nu_water = _resolve_nu_water(cfg_n, nu_water_override)
         wp.launch(
             leach_at_surface,
             dim=(nx, ny, nz),
@@ -1318,7 +1376,7 @@ def _step_reaction_diffusion_leach(
                 grid.dx,
                 dt,
                 diameter,
-                cfg_n.nu_water_m2_per_s,
+                nu_water,
                 cfg_n.D_water_molec_m2_per_s,
                 cfg_n.K_partition,
                 cfg_n.C_water_sat_mg_per_kg,

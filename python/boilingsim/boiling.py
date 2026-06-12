@@ -18,12 +18,16 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import warp as wp
 
 from .config import BoilingConfig, ScenarioConfig
 from .geometry import MAT_FLUID, MAT_POT_WALL, Grid
+
+if TYPE_CHECKING:
+    from .thermal import MaterialProps
 
 
 # ---------------------------------------------------------------------------
@@ -285,15 +289,17 @@ def allocate_bubble_pool(cfg: ScenarioConfig, grid: Grid,
                           device: str = "cuda:0") -> BubblePool:
     """Allocate the bubble pool + nucleation bookkeeping arrays on the device."""
     boiling = cfg.boiling
-    water_props = {"T_sat": 373.15, "rho_v": 0.598, "h_lv": 2.257e6,
-                   "sigma": 0.0589}  # read from materials.json in full build
 
     bubbles = wp.zeros(boiling.max_bubbles, dtype=Bubble, device=device)
     slot_claim = wp.zeros(boiling.max_bubbles, dtype=int, device=device)
     needs_fragment = wp.zeros(boiling.max_bubbles, dtype=int, device=device)
     nx, ny, nz = grid.shape
     site_active = wp.zeros((nx, ny, nz), dtype=int, device=device)
-    table = build_nucleation_table(boiling, water_props, device=device)
+    # The simplified engineering form of N_a(dT) currently doesn't depend on
+    # water properties (the Hsu D_c estimate is folded into the calibrated
+    # scale constant). When the full Kocamustafaogullari-Ishii F(rho*) lands,
+    # plumb props through here from data/materials.json.
+    table = build_nucleation_table(boiling, {}, device=device)
 
     # M3 spatial-hash workspace: covers the full grid domain in
     # ``coalescence_bin_size_m`` cubes. Coverage is generous (1-2 bins
@@ -1696,6 +1702,7 @@ def step_nucleation(
     grid: Grid,
     pool: BubblePool,
     cfg: ScenarioConfig,
+    props: "MaterialProps",
     dt: float,
     sim_time: float,
     step_count: int,
@@ -1706,7 +1713,6 @@ def step_nucleation(
     Safe to call every step. Cheap -- one kernel pass over (nx, ny, nz).
     """
     nx, ny, nz = grid.shape
-    T_sat_k = 373.15  # water saturation at 1 atm
 
     wp.launch(
         detect_nucleation_sites,
@@ -1720,7 +1726,7 @@ def step_nucleation(
             pool.nucleation_table,
             wp.vec3(*grid.origin),
             grid.dx,
-            T_sat_k,
+            props.T_sat_k,
             cfg.boiling.dT_onb_k,
             _DT_MAX_K,
             _N_ENTRIES,
@@ -1741,6 +1747,7 @@ def step_update_bubbles(
     grid: Grid,
     pool: BubblePool,
     cfg: ScenarioConfig,
+    props: "MaterialProps",
     dt: float,
     sim_time: float,
     device: str = "cuda:0",
@@ -1750,14 +1757,9 @@ def step_update_bubbles(
 
     Runs one kernel pass over the full pool. Inactive bubbles return early.
     """
-    T_sat_k = 373.15
-    rho_l = 997.0
-    rho_v = 0.598
-    cp_l = 4186.0
-    k_l = 0.606
-    h_lv = 2.257e6
-    sigma = 0.0589
-    g_mag = 9.81
+    rho_l = float(props.rho[MAT_FLUID])
+    cp_l = float(props.c_p[MAT_FLUID])
+    k_l = float(props.k[MAT_FLUID])
 
     # Water line z = base_thickness + fill_fraction * inner_height
     h_inner = cfg.pot.height_m - cfg.pot.base_thickness_m
@@ -1779,9 +1781,9 @@ def step_update_bubbles(
             dt,
             sim_time,
             water_line_z,
-            T_sat_k, rho_l, rho_v, cp_l, k_l, h_lv, sigma,
+            props.T_sat_k, rho_l, props.rho_v, cp_l, k_l, props.h_lv, props.sigma,
             cfg.boiling.contact_angle_rad,
-            g_mag,
+            props.g,
             cfg.boiling.initial_bubble_radius_m,
             cfg.boiling.fragmentation_radius_m,
             cfg.boiling.max_bubble_radius_m,
@@ -1894,6 +1896,7 @@ def step_scatter_latent_heat(
     grid: Grid,
     pool: BubblePool,
     cfg: ScenarioConfig,
+    props: "MaterialProps",
     dt: float,
     sim_time: float,
     device: str = "cuda:0",
@@ -1906,11 +1909,8 @@ def step_scatter_latent_heat(
     scatter on their birth step (their dR/dt is the analytic early-growth
     slope which is unbounded at t=0; the ``age <= 1e-6`` guard handles this).
     """
-    T_sat_k = 373.15
-    rho_l = 997.0
-    cp_l = 4186.0
-    rho_v = 0.598
-    h_lv = 2.257e6
+    rho_l = float(props.rho[MAT_FLUID])
+    cp_l = float(props.c_p[MAT_FLUID])
 
     wp.launch(
         scatter_latent_heat,
@@ -1923,8 +1923,8 @@ def step_scatter_latent_heat(
             grid.dx,
             dt,
             sim_time,
-            rho_l, cp_l, rho_v, h_lv,
-            T_sat_k,
+            rho_l, cp_l, props.rho_v, props.h_lv,
+            props.T_sat_k,
             MAT_FLUID,
         ],
         device=device,
@@ -1935,7 +1935,7 @@ def step_wall_boiling_flux(
     grid: Grid,
     pool: BubblePool,
     cfg: ScenarioConfig,
-    props,  # MaterialProps from thermal module (carries rho_wp, cp_wp)
+    props: "MaterialProps",  # carries rho_wp, cp_wp + saturation water scalars
     dt: float,
     device: str = "cuda:0",
 ) -> None:
@@ -1947,13 +1947,7 @@ def step_wall_boiling_flux(
     that removes microlayer-evaporation energy from the wall.
     """
     nx, ny, nz = grid.shape
-    T_sat_k = 373.15
-    rho_l = 997.0
-    rho_v = 0.598
-    h_lv = 2.257e6
-    sigma = 0.0589
-    g_mag = 9.81
-
+    rho_l = float(props.rho[MAT_FLUID])
     q_stove_cap = cfg.heating.base_heat_flux_w_per_m2
 
     wp.launch(
@@ -1967,16 +1961,16 @@ def step_wall_boiling_flux(
             props.cp_wp,
             grid.dx,
             dt,
-            T_sat_k,
+            props.T_sat_k,
             cfg.boiling.dT_onb_k,
             _DT_MAX_K,
             _N_ENTRIES,
             cfg.boiling.contact_angle_rad,
-            sigma,
-            g_mag,
+            props.sigma,
+            props.g,
             rho_l,
-            rho_v,
-            h_lv,
+            props.rho_v,
+            props.h_lv,
             q_stove_cap,
             MAT_POT_WALL,
             MAT_FLUID,
@@ -1989,6 +1983,7 @@ def step_scatter_momentum(
     grid: Grid,
     pool: BubblePool,
     cfg: ScenarioConfig,
+    props: "MaterialProps",
     dt: float,
     device: str = "cuda:0",
 ) -> None:
@@ -1996,9 +1991,7 @@ def step_scatter_momentum(
     force to the nearby vertical face velocities. Must run AFTER update_bubbles
     (so radii are current) and should run alongside the Boussinesq buoyancy step.
     """
-    rho_l = 997.0
-    rho_v = 0.598
-    g_mag = 9.81
+    rho_l = float(props.rho[MAT_FLUID])
 
     wp.launch(
         scatter_bubble_momentum,
@@ -2010,7 +2003,7 @@ def step_scatter_momentum(
             wp.vec3(*grid.origin),
             grid.dx,
             dt,
-            rho_l, rho_v, g_mag,
+            rho_l, props.rho_v, props.g,
             MAT_FLUID,
         ],
         device=device,
@@ -2061,6 +2054,7 @@ def step_bubbles(
     grid: Grid,
     pool: BubblePool,
     cfg: ScenarioConfig,
+    props: "MaterialProps",
     dt: float,
     sim_time: float,
     step_count: int,
@@ -2095,13 +2089,13 @@ def step_bubbles(
     the wall runs away to ~155 C; without the bulk scatter the fluid goes
     subcooled because the wall kernel diverts all stove heat to vapor.
     """
-    step_update_bubbles(grid, pool, cfg, dt, sim_time, device=device)
+    step_update_bubbles(grid, pool, cfg, props, dt, sim_time, device=device)
     step_fragment_bubbles(pool, cfg, device=device)
     step_coalesce_bubbles(pool, cfg, device=device)
-    step_scatter_latent_heat(grid, pool, cfg, dt, sim_time, device=device)
-    step_scatter_momentum(grid, pool, cfg, dt, device=device)
+    step_scatter_latent_heat(grid, pool, cfg, props, dt, sim_time, device=device)
+    step_scatter_momentum(grid, pool, cfg, props, dt, device=device)
     step_reduce_water_alpha(grid, pool, device=device)
-    step_nucleation(grid, pool, cfg, dt, sim_time, step_count, device=device)
+    step_nucleation(grid, pool, cfg, props, dt, sim_time, step_count, device=device)
 
 
 # Expose module-level constants for tests

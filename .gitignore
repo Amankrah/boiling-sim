@@ -58,3 +58,8 @@ dashboard_runs/*
 # Secrets
 .env
 .env.*
+
+# Funding / proposal (local only — do not commit)
+NOTE_FOR_BOSS.md
+proposal.md
+proposal_appendix*.md

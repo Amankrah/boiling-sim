@@ -71,7 +71,7 @@ def _run_steady_heat(grid, cfg, duration_s: float, device: str,
     for step in range(n_steps):
         conduct_one_step(grid, props, ws, cfg, dt, device=device)
         if with_bubbles:
-            step_nucleation(grid, grid.bubbles, cfg, dt,
+            step_nucleation(grid, grid.bubbles, cfg, props, dt,
                             sim_time=step * dt, step_count=step, device=device)
         if step % checkpoint_every == 0 or step == n_steps - 1:
             wp.synchronize()

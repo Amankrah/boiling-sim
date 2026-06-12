@@ -16,6 +16,7 @@ from boilingsim.boiling import (
 )
 from boilingsim.config import BoilingConfig, ScenarioConfig, load_scenario
 from boilingsim.geometry import MAT_POT_WALL, build_pot_geometry
+from boilingsim.thermal import MaterialProps
 
 
 @pytest.fixture(scope="module")
@@ -30,6 +31,18 @@ def boil_cfg() -> ScenarioConfig:
 @pytest.fixture(scope="module")
 def boil_grid(boil_cfg):
     return build_pot_geometry(boil_cfg)
+
+
+@pytest.fixture(scope="module")
+def boil_props(boil_cfg) -> MaterialProps:
+    """Shared MaterialProps for tests calling step_* drivers directly.
+
+    Every test in this module builds its cfg from single_carrot.yaml (steel
+    pot), and water/saturation properties are JSON-only (cfg-independent),
+    so this single fixture is safe to share. Tests that mutate cfg.pot.material
+    would need a per-test props -- none currently do.
+    """
+    return MaterialProps.from_scenario(boil_cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +92,7 @@ def test_bubble_pool_allocation(boil_cfg, boil_grid):
 # ---------------------------------------------------------------------------
 
 
-def test_no_nucleation_below_onb(boil_cfg):
+def test_no_nucleation_below_onb(boil_cfg, boil_props):
     """Wall at T_sat + 1 K (below 5 K ONB threshold): no bubbles spawn."""
     cfg = boil_cfg.model_copy(deep=True)
     grid = build_pot_geometry(cfg)
@@ -90,12 +103,12 @@ def test_no_nucleation_below_onb(boil_cfg):
     grid.T.assign(T_np)
 
     for step in range(5):
-        step_nucleation(grid, pool, cfg, dt=0.01, sim_time=step * 0.01, step_count=step)
+        step_nucleation(grid, pool, cfg, boil_props, dt=0.01, sim_time=step * 0.01, step_count=step)
     wp.synchronize()
     assert pool.count_active() == 0, "Bubbles spawned despite T_wall below ONB"
 
 
-def test_nucleation_at_hot_base(boil_cfg):
+def test_nucleation_at_hot_base(boil_cfg, boil_props):
     """Wall at T_sat + 20 K: many sites spawn; count within an order of magnitude."""
     cfg = boil_cfg.model_copy(deep=True)
     grid = build_pot_geometry(cfg)
@@ -106,7 +119,7 @@ def test_nucleation_at_hot_base(boil_cfg):
     grid.T.assign(T_np)
 
     # One step is enough at 20 K superheat — N_a is huge.
-    step_nucleation(grid, pool, cfg, dt=0.01, sim_time=0.0, step_count=0)
+    step_nucleation(grid, pool, cfg, boil_props, dt=0.01, sim_time=0.0, step_count=0)
     wp.synchronize()
     n_active = pool.count_active()
     # Sanity: at least a few, no more than pool size.
@@ -124,7 +137,7 @@ def test_nucleation_at_hot_base(boil_cfg):
     assert n_flagged == n_active
 
 
-def test_nucleation_respects_pool_capacity():
+def test_nucleation_respects_pool_capacity(boil_props):
     """Set a ridiculously small pool and an extreme superheat. New bubbles should
     stop being added once the pool is full."""
     cfg = load_scenario("configs/scenarios/single_carrot.yaml")
@@ -140,7 +153,7 @@ def test_nucleation_respects_pool_capacity():
     grid.T.assign(T_np)
 
     for step in range(3):
-        step_nucleation(grid, pool, cfg, dt=0.01, sim_time=step * 0.01, step_count=step)
+        step_nucleation(grid, pool, cfg, boil_props, dt=0.01, sim_time=step * 0.01, step_count=step)
     wp.synchronize()
     n_active = pool.count_active()
     assert n_active <= 16, f"Pool overflow: {n_active} active bubbles in 16-slot pool"
@@ -214,7 +227,7 @@ def test_terminal_slip_monotonic_below_plateau():
         )
 
 
-def test_mikic_rohsenow_growth_rate_analytic():
+def test_mikic_rohsenow_growth_rate_analytic(boil_props):
     """At ΔT = 10 K, Ja ≈ 31, α_l ≈ 1.45e-7 m²/s; R(10 ms) ≈ 1.3 mm.
 
     Compares the sim's update_bubbles kernel output against the analytic
@@ -242,7 +255,7 @@ def test_mikic_rohsenow_growth_rate_analytic():
 
     # Step forward to t = 10 ms. dt doesn't control growth — age since birth does.
     sim_time = 0.010
-    step_update_bubbles(grid, pool, cfg, dt=1.0e-4, sim_time=sim_time)
+    step_update_bubbles(grid, pool, cfg, boil_props, dt=1.0e-4, sim_time=sim_time)
     wp.synchronize()
 
     out = pool.bubbles.numpy()[0]
@@ -272,7 +285,7 @@ def test_mikic_rohsenow_growth_rate_analytic():
 # ---------------------------------------------------------------------------
 
 
-def test_bubbles_rise_and_vent():
+def test_bubbles_rise_and_vent(boil_props):
     """Seed bubbles with radius > Fritz D_d near the base. Over 5 seconds of sim,
     they should rise (no fluid flow) and all eventually vent at the surface.
     """
@@ -304,7 +317,7 @@ def test_bubbles_rise_and_vent():
 
     dt = 5.0e-3
     for step in range(1000):
-        step_update_bubbles(grid, pool, cfg, dt, sim_time=step * dt)
+        step_update_bubbles(grid, pool, cfg, boil_props, dt, sim_time=step * dt)
     wp.synchronize()
 
     n_still_active = pool.count_active()
@@ -316,7 +329,7 @@ def test_bubbles_rise_and_vent():
 # ---------------------------------------------------------------------------
 
 
-def test_latent_heat_energy_balance():
+def test_latent_heat_energy_balance(boil_props):
     """Spawn a single bubble, run one scatter step; the total energy removed
     from the 8 surrounding cells must equal ρ_v·h_lv·4π·R²·(dR/dt)·dt.
 
@@ -357,7 +370,7 @@ def test_latent_heat_energy_balance():
     T_before = grid.T.numpy().copy()
     mat_np = grid.mat.numpy()
 
-    step_scatter_latent_heat(grid, pool, cfg, dt=dt, sim_time=sim_time)
+    step_scatter_latent_heat(grid, pool, cfg, boil_props, dt=dt, sim_time=sim_time)
     wp.synchronize()
 
     T_after = grid.T.numpy()
@@ -421,7 +434,7 @@ def test_wall_boiling_flux_cools_superheated_wall():
         for step in range(100):
             conduct_one_step(grid, props, ws, cfg, dt)
             if enable_boiling:
-                step_bubbles(grid, grid.bubbles, cfg, dt,
+                step_bubbles(grid, grid.bubbles, cfg, props, dt,
                              sim_time=step * dt, step_count=step)
                 step_wall_boiling_flux(grid, grid.bubbles, cfg, props, dt)
         wp.synchronize()
@@ -455,7 +468,7 @@ def test_wall_boiling_flux_cools_superheated_wall():
     )
 
 
-def test_no_sink_when_bubble_just_nucleated():
+def test_no_sink_when_bubble_just_nucleated(boil_props):
     """Bubbles with age < 1 μs shouldn't scatter (their analytic dR/dt is
     unbounded at t=0; the kernel guards against this). Seeding a bubble with
     birth_time == current_time should leave T unchanged.
@@ -479,7 +492,7 @@ def test_no_sink_when_bubble_just_nucleated():
                      radius=1.0e-5, birth_time=sim_time)   # age = 0 exactly
 
     T_before = grid.T.numpy().copy()
-    step_scatter_latent_heat(grid, pool, cfg, dt=1.0e-3, sim_time=sim_time)
+    step_scatter_latent_heat(grid, pool, cfg, boil_props, dt=1.0e-3, sim_time=sim_time)
     wp.synchronize()
     T_after = grid.T.numpy()
 
@@ -495,7 +508,7 @@ def test_no_sink_when_bubble_just_nucleated():
 # ---------------------------------------------------------------------------
 
 
-def test_bubble_momentum_creates_upward_velocity():
+def test_bubble_momentum_creates_upward_velocity(boil_props):
     """A single bubble scatter_bubble_momentum step must create positive
     upward velocity on the 8 surrounding z-faces (all inside water)."""
     from boilingsim.boiling import seed_test_bubble, step_scatter_momentum
@@ -517,7 +530,7 @@ def test_bubble_momentum_creates_upward_velocity():
     seed_test_bubble(pool, slot=0, position=(0.05, 0.0, 0.05),
                      velocity=(0.0, 0.0, 0.0), radius=R0, birth_time=0.0)
 
-    step_scatter_momentum(grid, pool, cfg, dt=1.0e-3)
+    step_scatter_momentum(grid, pool, cfg, boil_props, dt=1.0e-3)
     wp.synchronize()
 
     uz_after = grid.uz.numpy()
@@ -658,7 +671,7 @@ def test_full_bubble_step_no_nan_over_30s():
     )
 
 
-def test_bubble_deactivates_on_solid():
+def test_bubble_deactivates_on_solid(boil_props):
     """A bubble placed inside a carrot cell should be deactivated on the next
     update step (material at position != MAT_FLUID)."""
     from boilingsim.boiling import seed_test_bubble, step_update_bubbles
@@ -682,7 +695,7 @@ def test_bubble_deactivates_on_solid():
                      velocity=(0.0, 0.0, 0.2),
                      radius=R_big, birth_time=0.0)
 
-    step_update_bubbles(grid, pool, cfg, dt=1.0e-3, sim_time=0.0)
+    step_update_bubbles(grid, pool, cfg, boil_props, dt=1.0e-3, sim_time=0.0)
     wp.synchronize()
 
     out = pool.bubbles.numpy()[0]
@@ -694,7 +707,7 @@ def test_bubble_deactivates_on_solid():
 # ---------------------------------------------------------------------------
 
 
-def test_bubble_condenses_in_subcooled_fluid():
+def test_bubble_condenses_in_subcooled_fluid(boil_props):
     """A bubble placed in strongly subcooled liquid (T << T_sat) should shrink
     via Plesset-Zwick diffusion-controlled condensation and fully deactivate
     within a handful of update steps. At deactivation, the bubble's remaining
@@ -734,7 +747,7 @@ def test_bubble_condenses_in_subcooled_fluid():
     # 200 um bubble in sub-millisecond wall-clock, so << 20 ms of sim time.
     dt = 1.0e-4
     for step in range(200):
-        step_update_bubbles(grid, pool, cfg, dt=dt, sim_time=step * dt)
+        step_update_bubbles(grid, pool, cfg, boil_props, dt=dt, sim_time=step * dt)
     wp.synchronize()
 
     out = pool.bubbles.numpy()[0]
@@ -770,7 +783,7 @@ def test_bubble_condenses_in_subcooled_fluid():
     assert sum_dT_measured > 0.0, "condensation must deposit (not remove) heat"
 
 
-def test_no_condensation_when_fluid_at_saturation():
+def test_no_condensation_when_fluid_at_saturation(boil_props):
     """Regression guard: bubbles in liquid at T_sat should neither grow (no
     drive) nor shrink (the `_condensation_decrement` func gates on
     T_local < T_sat). Radius must be preserved across a step.
@@ -794,7 +807,7 @@ def test_no_condensation_when_fluid_at_saturation():
                      radius=R0, birth_time=0.0)
     wp.synchronize()
 
-    step_update_bubbles(grid, pool, cfg, dt=1.0e-3, sim_time=1.0e-3)
+    step_update_bubbles(grid, pool, cfg, boil_props, dt=1.0e-3, sim_time=1.0e-3)
     wp.synchronize()
 
     out = pool.bubbles.numpy()[0]

@@ -95,7 +95,10 @@ export interface NutrientDraft {
   K_partition: number;
   C_water_sat_mg_per_kg: number;
   C0_mg_per_kg: number;
-  nu_water_m2_per_s: number;
+  /** When ``null`` (the default), the Python pipeline derives ν from
+   *  ``data/materials.json`` as ``mu_100c / rho_l_100c``. Set a number
+   *  explicitly only to model a non-water continuous phase. */
+  nu_water_m2_per_s: number | null;
   D_water_molec_m2_per_s: number;
 }
 
@@ -177,7 +180,7 @@ export const BETA_CAROTENE_PRESET: NutrientDraft = {
   K_partition: 1.0e-5,
   C_water_sat_mg_per_kg: 6.0e-3,
   C0_mg_per_kg: 83.0,
-  nu_water_m2_per_s: 2.94e-7,
+  nu_water_m2_per_s: null,
   D_water_molec_m2_per_s: 1.0e-9,
 };
 
@@ -189,7 +192,7 @@ export const VITAMIN_C_PRESET: NutrientDraft = {
   K_partition: 1.0,
   C_water_sat_mg_per_kg: 1.0e6,
   C0_mg_per_kg: 59.0,
-  nu_water_m2_per_s: 2.94e-7,
+  nu_water_m2_per_s: null,
   D_water_molec_m2_per_s: 1.0e-9,
 };
 
@@ -307,7 +310,7 @@ export const DEFAULT_DRAFT: ScenarioDraft = {
     K_partition: 1.0e-5,
     C_water_sat_mg_per_kg: 6.0e-3,
     C0_mg_per_kg: 83.0,
-    nu_water_m2_per_s: 2.94e-7,
+    nu_water_m2_per_s: null,
     D_water_molec_m2_per_s: 1.0e-9,
   },
   nutrient2: {
@@ -318,7 +321,7 @@ export const DEFAULT_DRAFT: ScenarioDraft = {
     K_partition: 1.0,
     C_water_sat_mg_per_kg: 1.0e6,
     C0_mg_per_kg: 59.0,
-    nu_water_m2_per_s: 2.94e-7,
+    nu_water_m2_per_s: null,
     D_water_molec_m2_per_s: 1.0e-9,
   },
   simulation: {
@@ -346,7 +349,7 @@ export const PRESETS: Record<string, { label: string; draft: () => ScenarioDraft
         K_partition: 1.0,
         C_water_sat_mg_per_kg: 1.0e6,
         C0_mg_per_kg: 59.0,
-        nu_water_m2_per_s: 2.94e-7,
+        nu_water_m2_per_s: null,
         D_water_molec_m2_per_s: 1.0e-9,
       };
       return d;
@@ -547,7 +550,7 @@ export function makeBlankNutrient(name = ""): NamedNutrientDraft {
     K_partition: 1.0,
     C_water_sat_mg_per_kg: 1.0e3,
     C0_mg_per_kg: 100.0,
-    nu_water_m2_per_s: 2.94e-7,
+    nu_water_m2_per_s: null,
     D_water_molec_m2_per_s: 1.0e-9,
   };
 }
