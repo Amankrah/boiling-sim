@@ -17,6 +17,7 @@ sits in direct contact with water).
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -1765,6 +1766,38 @@ def step_update_bubbles(
     h_inner = cfg.pot.height_m - cfg.pot.base_thickness_m
     water_line_z = cfg.pot.base_thickness_m + cfg.water.fill_fraction * h_inner
 
+    if os.environ.get("BOILINGSIM_USE_RUST_SCATTER") == "1":
+        # Phase 5.7: per-bubble loop in CUDA. Same env-flag as the M5.6
+        # scatter kernels so one toggle turns all four Rust kernels on
+        # together (so the FFI overhead amortises across the most work).
+        rust = _get_rust_scatter_sim()
+        rust.update_bubbles(
+            int(pool.bubbles.ptr),
+            int(pool.max_bubbles),
+            int(pool.slot_claim.__cuda_array_interface__["data"][0]),
+            int(pool.site_active.__cuda_array_interface__["data"][0]),
+            int(pool.needs_fragment.__cuda_array_interface__["data"][0]),
+            int(grid.T.__cuda_array_interface__["data"][0]),
+            int(grid.mat.__cuda_array_interface__["data"][0]),
+            grid.shape[0], grid.shape[1], grid.shape[2],
+            int(grid.ux.__cuda_array_interface__["data"][0]),
+            grid.ux.shape[0], grid.ux.shape[1], grid.ux.shape[2],
+            int(grid.uy.__cuda_array_interface__["data"][0]),
+            grid.uy.shape[0], grid.uy.shape[1], grid.uy.shape[2],
+            int(grid.uz.__cuda_array_interface__["data"][0]),
+            grid.uz.shape[0], grid.uz.shape[1], grid.uz.shape[2],
+            grid.origin[0], grid.origin[1], grid.origin[2],
+            grid.dx, dt, sim_time, water_line_z,
+            props.T_sat_k, rho_l, props.rho_v, cp_l, k_l, props.h_lv, props.sigma,
+            cfg.boiling.contact_angle_rad,
+            props.g,
+            cfg.boiling.initial_bubble_radius_m,
+            cfg.boiling.fragmentation_radius_m,
+            cfg.boiling.max_bubble_radius_m,
+            MAT_FLUID,
+        )
+        return
+
     wp.launch(
         update_bubbles,
         dim=pool.max_bubbles,
@@ -1908,9 +1941,32 @@ def step_scatter_latent_heat(
     BEFORE :func:`step_nucleation` so newly-spawned bubbles (age=0) don't
     scatter on their birth step (their dR/dt is the analytic early-growth
     slope which is unbounded at t=0; the ``age <= 1e-6`` guard handles this).
+
+    Phase 5.6 M5.6.A: when ``BOILINGSIM_USE_RUST_SCATTER=1``, route through
+    the hand-written CUDA kernel via sim_core.cuda. Default OFF; parity
+    validated by ``python/tests/test_scatter_parity.py``.
     """
     rho_l = float(props.rho[MAT_FLUID])
     cp_l = float(props.c_p[MAT_FLUID])
+
+    if os.environ.get("BOILINGSIM_USE_RUST_SCATTER") == "1":
+        rust = _get_rust_scatter_sim()
+        # Bubble pool uses .ptr (private) because struct-typed wp.arrays
+        # don't expose __cuda_array_interface__. f32/i32 arrays use the
+        # public CAI path validated in M1.
+        rust.scatter_latent_heat(
+            int(pool.bubbles.ptr),
+            int(pool.max_bubbles),
+            int(grid.T.__cuda_array_interface__["data"][0]),
+            int(grid.mat.__cuda_array_interface__["data"][0]),
+            grid.shape[0], grid.shape[1], grid.shape[2],
+            grid.origin[0], grid.origin[1], grid.origin[2],
+            grid.dx, dt, sim_time,
+            rho_l, cp_l, props.rho_v, props.h_lv,
+            props.T_sat_k,
+            MAT_FLUID,
+        )
+        return
 
     wp.launch(
         scatter_latent_heat,
@@ -1929,6 +1985,26 @@ def step_scatter_latent_heat(
         ],
         device=device,
     )
+
+
+# Phase 5.6: cached Rust SimCore for the scatter kernels (mirror of
+# fluid.py's _get_rust_sim). Held module-level so the cuDevicePrimaryCtxRetain
+# refcount stays stable across many step_bubbles calls.
+_RUST_SCATTER_SIM = None
+
+
+def _get_rust_scatter_sim():
+    global _RUST_SCATTER_SIM
+    if _RUST_SCATTER_SIM is None:
+        import sim_core
+        if sim_core.cuda is None:
+            raise RuntimeError(
+                "BOILINGSIM_USE_RUST_SCATTER=1 but sim_core.cuda is unavailable "
+                "(no CUDA driver or extension built without CUDA). "
+                "Unset the env var or run scripts/bootstrap.ps1."
+            )
+        _RUST_SCATTER_SIM = sim_core.cuda.SimCore(0)
+    return _RUST_SCATTER_SIM
 
 
 def step_wall_boiling_flux(
@@ -1990,8 +2066,26 @@ def step_scatter_momentum(
     """Milestone-D two-way momentum coupling: add each bubble's excess-buoyancy
     force to the nearby vertical face velocities. Must run AFTER update_bubbles
     (so radii are current) and should run alongside the Boussinesq buoyancy step.
+
+    Phase 5.6 M5.6.B: routes through Rust kernel when ``BOILINGSIM_USE_RUST_SCATTER=1``.
     """
     rho_l = float(props.rho[MAT_FLUID])
+
+    if os.environ.get("BOILINGSIM_USE_RUST_SCATTER") == "1":
+        rust = _get_rust_scatter_sim()
+        rust.scatter_momentum(
+            int(pool.bubbles.ptr),
+            int(pool.max_bubbles),
+            int(grid.uz.__cuda_array_interface__["data"][0]),
+            int(grid.mat.__cuda_array_interface__["data"][0]),
+            grid.shape[0], grid.shape[1], grid.shape[2],
+            grid.uz.shape[0], grid.uz.shape[1], grid.uz.shape[2],
+            grid.origin[0], grid.origin[1], grid.origin[2],
+            grid.dx, dt,
+            rho_l, props.rho_v, props.g,
+            MAT_FLUID,
+        )
+        return
 
     wp.launch(
         scatter_bubble_momentum,
@@ -2027,6 +2121,20 @@ def step_reduce_water_alpha(
     nx, ny, nz = grid.shape
     # Reset alpha to baseline.
     wp.copy(grid.water_alpha, grid.water_alpha_base)
+
+    if os.environ.get("BOILINGSIM_USE_RUST_SCATTER") == "1":
+        rust = _get_rust_scatter_sim()
+        rust.reduce_water_alpha(
+            int(pool.bubbles.ptr),
+            int(pool.max_bubbles),
+            int(grid.water_alpha.__cuda_array_interface__["data"][0]),
+            int(grid.mat.__cuda_array_interface__["data"][0]),
+            nx, ny, nz,
+            grid.origin[0], grid.origin[1], grid.origin[2],
+            grid.dx,
+            MAT_FLUID,
+        )
+        return
 
     wp.launch(
         reduce_water_alpha_by_bubble_occupancy,

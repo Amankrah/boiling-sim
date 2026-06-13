@@ -1,0 +1,10 @@
+phase,total_s,mean_ms_per_step,frac_pct
+step_bubbles,10.584740,4.320302,43.2534
+pressure_projection,8.886983,3.627340,36.3157
+conduct_one_step,2.952990,1.205302,12.0671
+compute_dt,0.982362,0.400964,4.0143
+advect_all,0.477606,0.194941,1.9517
+no_slip_post,0.208890,0.085261,0.8536
+wall_boiling_flux,0.142444,0.058140,0.5821
+no_slip_pre,0.132758,0.054187,0.5425
+buoyancy,0.102714,0.041924,0.4197

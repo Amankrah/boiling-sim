@@ -9,6 +9,8 @@ pyo3 = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Phase 5: hand-written CUDA kernels live here.
+cuda-kernels = { path = "../cuda-kernels" }
 
 [lib]
 name = "sim_core"

@@ -14,6 +14,7 @@ Step sequence (driven from ``pipeline.py`` in Milestone D):
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import warp as wp
@@ -524,6 +525,28 @@ def allocate_fluid_workspace(grid: Grid, device: str = "cuda:0") -> FluidWorkspa
     )
 
 
+# Phase 5: cached Rust SimCore handle. Created on first
+# pressure_projection() call when BOILINGSIM_USE_RUST_PRESSURE=1; kept
+# alive for the rest of the process. Keeps the cuDevicePrimaryCtxRetain
+# refcount stable and avoids re-paying Python-side PyObject construction
+# every projection.
+_RUST_SIM_CORE = None
+
+
+def _get_rust_sim():
+    global _RUST_SIM_CORE
+    if _RUST_SIM_CORE is None:
+        import sim_core
+        if sim_core.cuda is None:
+            raise RuntimeError(
+                "BOILINGSIM_USE_RUST_PRESSURE=1 but sim_core.cuda is unavailable "
+                "(no CUDA driver or extension built without CUDA). "
+                "Unset the env var or run scripts/bootstrap.ps1."
+            )
+        _RUST_SIM_CORE = sim_core.cuda.SimCore(0)
+    return _RUST_SIM_CORE
+
+
 def pressure_projection(
     grid: Grid,
     ws: FluidWorkspace,
@@ -551,18 +574,43 @@ def pressure_projection(
         device=device,
     )
 
-    # Jacobi iterations (ping-pong p ↔ p_tmp).
-    # After N iterations, the result lives in p_tmp when N is odd, in grid.p
-    # when N is even.
-    for it in range(cfg.solver.pressure_max_iter):
-        src = grid.p if (it % 2 == 0) else ws.p_tmp
-        dst = ws.p_tmp if (it % 2 == 0) else grid.p
-        wp.launch(
-            jacobi_pressure_step,
-            dim=(nx, ny, nz),
-            inputs=[dst, src, ws.div_u, grid.mat, dx, dt, rho, MAT_FLUID, MAT_AIR],
-            device=device,
+    # Phase-5 M2: route the inner Jacobi loop through the hand-written CUDA
+    # kernel when BOILINGSIM_USE_RUST_PRESSURE=1. Default OFF so the existing
+    # 187-test suite continues to exercise the Warp reference; the parametrized
+    # parity fixture in test_pressure_parity.py flips this on for the Rust path.
+    # M3 lands CUDA Graph capture; M4 flips the default ON if the perf gate hits.
+    use_rust = os.environ.get("BOILINGSIM_USE_RUST_PRESSURE") == "1"
+    if use_rust:
+        rust = _get_rust_sim()
+        # CUDA Array Interface protocol -- the public way to ask Warp for the
+        # raw device pointer. Validated against arr.ptr in M1 parity tests.
+        p_ptr = int(grid.p.__cuda_array_interface__["data"][0])
+        p_tmp_ptr = int(ws.p_tmp.__cuda_array_interface__["data"][0])
+        div_u_ptr = int(ws.div_u.__cuda_array_interface__["data"][0])
+        mat_ptr = int(grid.mat.__cuda_array_interface__["data"][0])
+        # M3: one fused call into Rust runs the whole 200-iter loop in CUDA
+        # C++. Eliminates 199 Python→PyO3 transitions per projection. Final
+        # pressure ends up in grid.p regardless of n_iter parity (the C++
+        # launcher handles the odd-iter swap internally).
+        rust.pressure_solve(
+            p_ptr, p_tmp_ptr, div_u_ptr, mat_ptr,
+            nx, ny, nz, dx, dt, rho,
+            cfg.solver.pressure_max_iter,
+            MAT_FLUID, MAT_AIR,
         )
+    else:
+        # Jacobi iterations (ping-pong p ↔ p_tmp).
+        # After N iterations, the result lives in p_tmp when N is odd, in grid.p
+        # when N is even.
+        for it in range(cfg.solver.pressure_max_iter):
+            src = grid.p if (it % 2 == 0) else ws.p_tmp
+            dst = ws.p_tmp if (it % 2 == 0) else grid.p
+            wp.launch(
+                jacobi_pressure_step,
+                dim=(nx, ny, nz),
+                inputs=[dst, src, ws.div_u, grid.mat, dx, dt, rho, MAT_FLUID, MAT_AIR],
+                device=device,
+            )
     if cfg.solver.pressure_max_iter % 2 == 1:
         # Odd N → last write was to p_tmp; canonicalize into grid.p.
         wp.copy(grid.p, ws.p_tmp)

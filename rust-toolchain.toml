@@ -1,0 +1,6 @@
+[toolchain]
+# 1.85 is the first stable Rust to ship edition2024, which transitive deps
+# of cudarc 0.12 and reqwest 0.12 require. 1.82 fails on `rmp 0.8.15`.
+channel = "1.85"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

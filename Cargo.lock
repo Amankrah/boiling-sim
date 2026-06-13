@@ -1291,6 +1291,7 @@ name = "sim-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cuda-kernels",
  "cudarc",
  "pyo3",
  "serde",

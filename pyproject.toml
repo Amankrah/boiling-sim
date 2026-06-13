@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "boilingsim"
@@ -40,9 +40,23 @@ dashboard = [
 [project.scripts]
 boiling-sim-scenario = "boilingsim.scenario:main"
 
-[tool.setuptools.packages.find]
-where = ["python"]
+# Maturin builds the Rust extension `sim_core` (from crates/sim-core) and
+# installs it alongside the pure-Python `boilingsim` package living under
+# `python/`. The combined wheel ships both. Importing `sim_core` works at
+# top level (`from sim_core.props import MaterialProps`); `boilingsim` keeps
+# its existing import path.
+#
+# Cargo workspace lives at repo root; `manifest-path` points at the sim-core
+# crate specifically. cudarc + pyo3 dependencies flow in via the workspace.
+[tool.maturin]
+manifest-path = "crates/sim-core/Cargo.toml"
+python-source = "python"
+module-name = "sim_core"
+features = ["pyo3/extension-module"]
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
 pythonpath = ["python"]
+markers = [
+    "cuda_required: marks tests that require a CUDA device and the Rust sim_core.cuda submodule (skipped on CPU-only machines)",
+]
