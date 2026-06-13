@@ -30,6 +30,7 @@ Example::
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import sys
 import time
@@ -38,6 +39,25 @@ from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
+
+# ---------------------------------------------------------------------------
+# Phase 5 / 5.6 / 5.7 / 6 default routing.
+#
+# Empirical shootout (steel scenario, dx=2mm, 200 iter, 10 sim-s, RTX 6000
+# Ada): pure Warp = 3.04 s/sim-s; BOILINGSIM_USE_RUST_PRESSURE=1 = 2.54
+# s/sim-s (-16.3 %); BOILINGSIM_PRESSURE_SOLVER=cg-rust = 5.21 s/sim-s
+# (+71 % regression on this geometry); USE_RUST_SCATTER=1 adds small
+# FFI overhead (-14.2 % combined vs Warp). Rust Jacobi is the clear winner
+# so the dashboard defaults to it. Users can opt out via --no-rust-pressure.
+#
+# This must run BEFORE any boilingsim module is imported so the env var is
+# in place by the time pressure_projection() reads it.
+if (
+    os.environ.get("BOILINGSIM_USE_RUST_PRESSURE") is None
+    and os.environ.get("BOILINGSIM_PRESSURE_SOLVER") is None
+    and "--no-rust-pressure" not in sys.argv
+):
+    os.environ["BOILINGSIM_USE_RUST_PRESSURE"] = "1"
 
 from boilingsim.config import load_scenario  # noqa: E402
 from boilingsim.dashboard import (  # noqa: E402
@@ -227,7 +247,27 @@ def main() -> int:
              "Default: env BOILINGSIM_ARTIFACTS_DIR if set, else "
              "./dashboard_runs.",
     )
+    ap.add_argument(
+        "--no-rust-pressure", action="store_true",
+        help="Disable the Rust pressure-projection fast path (default ON, "
+             "which gives ~16 %% end-to-end speedup vs pure Warp on steel "
+             "at dx=2mm). Use this for debugging or A/B comparisons. The "
+             "default is set at module import time via BOILINGSIM_USE_RUST_PRESSURE=1; "
+             "this flag merely suppresses that default. If you set "
+             "BOILINGSIM_PRESSURE_SOLVER=cg-rust in your environment, that "
+             "takes precedence and this flag is ignored.",
+    )
     args = ap.parse_args()
+
+    # Surface which pressure solver path is active so the user knows what
+    # they're running. The env var was set at module import time before any
+    # boilingsim modules saw it.
+    if os.environ.get("BOILINGSIM_PRESSURE_SOLVER") == "cg-rust":
+        print("[pressure-solver] PCG (Phase 6) -- opt-in via BOILINGSIM_PRESSURE_SOLVER=cg-rust")
+    elif os.environ.get("BOILINGSIM_USE_RUST_PRESSURE") == "1":
+        print("[pressure-solver] Rust Jacobi (Phase 5) -- the dashboard default")
+    else:
+        print("[pressure-solver] Pure Warp Jacobi -- explicit opt-out via --no-rust-pressure")
 
     artefacts_dir = args.artefacts_dir or pathlib.Path(
         __import__("os").environ.get(
