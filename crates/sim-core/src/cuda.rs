@@ -354,6 +354,63 @@ impl SimCore {
         Ok(())
     }
 
+    /// Phase 6: PCG pressure solver.
+    ///
+    /// Mirrors :py:func:`boilingsim.fluid.pressure_projection` (Jacobi
+    /// reference). Runs the entire CG loop in CUDA C++, with all state
+    /// (residual, search direction, alpha, beta, etc.) device-resident.
+    /// Returns the iteration count so the Python side can log convergence.
+    ///
+    /// All workspace pointers are caller-allocated. Layout:
+    ///   - ws_b, ws_r, ws_z, ws_p_search, ws_ap: each `nx*ny*nz` floats
+    ///   - dot_workspace: at least 1024 floats
+    ///   - 7 device scalars: 1 float each (alpha, beta, rzold, rznew, bsq, rsq, pAp)
+    #[pyo3(signature = (
+        p_out_ptr, div_u_ptr, mat_ptr,
+        nx, ny, nz,
+        dx, dt, rho,
+        pressure_tol, max_iter,
+        ws_b_ptr, ws_r_ptr, ws_z_ptr, ws_p_search_ptr, ws_ap_ptr,
+        dot_workspace_ptr,
+        dev_alpha_ptr, dev_beta_ptr, dev_rzold_ptr, dev_rznew_ptr,
+        dev_bsq_ptr, dev_rsq_ptr, dev_pap_ptr,
+        mat_fluid=0, mat_air=2,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn pressure_solve_pcg(
+        &self,
+        p_out_ptr: u64,
+        div_u_ptr: u64,
+        mat_ptr: u64,
+        nx: usize, ny: usize, nz: usize,
+        dx: f32, dt: f32, rho: f32,
+        pressure_tol: f32, max_iter: usize,
+        ws_b_ptr: u64, ws_r_ptr: u64, ws_z_ptr: u64,
+        ws_p_search_ptr: u64, ws_ap_ptr: u64,
+        dot_workspace_ptr: u64,
+        dev_alpha_ptr: u64, dev_beta_ptr: u64,
+        dev_rzold_ptr: u64, dev_rznew_ptr: u64,
+        dev_bsq_ptr: u64, dev_rsq_ptr: u64, dev_pap_ptr: u64,
+        mat_fluid: i32, mat_air: i32,
+    ) -> PyResult<usize> {
+        unsafe {
+            cuda_kernels::pressure_solve_pcg_raw(
+                &self.device,
+                p_out_ptr, div_u_ptr, mat_ptr,
+                nx, ny, nz,
+                dx, dt, rho,
+                mat_fluid, mat_air,
+                pressure_tol, max_iter,
+                ws_b_ptr, ws_r_ptr, ws_z_ptr, ws_p_search_ptr, ws_ap_ptr,
+                dot_workspace_ptr,
+                dev_alpha_ptr, dev_beta_ptr,
+                dev_rzold_ptr, dev_rznew_ptr,
+                dev_bsq_ptr, dev_rsq_ptr, dev_pap_ptr,
+            )
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+        }
+    }
+
     fn __repr__(&self) -> String {
         format!("SimCore(device_id={})", self.device_id)
     }

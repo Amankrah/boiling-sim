@@ -163,8 +163,23 @@ class SolverConfig(BaseModel):
 
     cfl_safety_factor: float = Field(0.4, gt=0.0, le=0.5)
     max_dt_s: float = Field(0.1, gt=0.0, description="Hard cap on Δt regardless of CFL")
-    pressure_tol: float = Field(1e-5, gt=0.0)
-    pressure_max_iter: int = Field(200, gt=0)
+    pressure_tol: float = Field(
+        1e-5, gt=0.0,
+        description="Relative residual tolerance for the pressure Poisson solve: "
+                    "stop when ||A*p - b||_2 / ||b||_2 <= pressure_tol. "
+                    "ONLY consulted by the PCG path "
+                    "(BOILINGSIM_PRESSURE_SOLVER=cg-rust); the default Jacobi "
+                    "and rust-jacobi paths run a fixed pressure_max_iter "
+                    "iterations regardless of this field. Default 1e-5 is "
+                    "realistic for the Jacobi-preconditioned CG at ~30-50 "
+                    "iterations on the 96^3 dev grid.",
+    )
+    pressure_max_iter: int = Field(
+        200, gt=0,
+        description="For Jacobi paths: fixed iteration count. For PCG: hard "
+                    "safety cap; convergence is reached well before this on "
+                    "well-conditioned problems.",
+    )
     diffusion_tol: float = Field(1e-4, gt=0.0)
     diffusion_max_iter: int = Field(15, gt=0)
     h_conv_outer_w_per_m2_k: float = Field(10.0, ge=0.0, description="Newton cooling coefficient on outer pot wall")

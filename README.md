@@ -88,6 +88,31 @@ The plan hypothesised that porting `update_bubbles` would amortise the M5.6 FFI 
 
 Pressure-only stays the canonical fast-path: it's the cleanest single-flag win (-15.6 % steel, no scatter-side FFI overhead) and the only Rust path with a measurable end-to-end perf delta. The four bubble kernels are kept on for future work (Phase 6 CG solver would need them already wired, and the validation harness is reusable). See [`refactored-swimming-boot.md`](../../.claude/plans/refactored-swimming-boot.md) for the full Phase 5.7 plan and the honest perf retrospective.
 
+### Phase 6: PCG pressure solver
+
+Replaces the 200-iter Jacobi loop with Jacobi-preconditioned Conjugate Gradient. Five new CUDA kernels ([`laplacian_spmv.cu`](crates/cuda-kernels/src/laplacian_spmv.cu), [`diag_inverse_apply.cu`](crates/cuda-kernels/src/diag_inverse_apply.cu), [`dot_reduce.cu`](crates/cuda-kernels/src/dot_reduce.cu), [`axpy_device.cu`](crates/cuda-kernels/src/axpy_device.cu), [`pressure_solve_pcg.cu`](crates/cuda-kernels/src/pressure_solve_pcg.cu)) plus a deterministic two-kernel reduction (no `atomicAdd` ordering flake), all state device-resident across the inner loop. Opt-in via `BOILINGSIM_PRESSURE_SOLVER=cg-rust` (default `jacobi`). Mutually exclusive with `BOILINGSIM_USE_RUST_PRESSURE=1`; conflict raises at startup.
+
+Five validation gates green ([`test_pressure_cg.py`](python/tests/test_pressure_cg.py)): sign-convention sanity, dot-reduction unit test, `pressure_tol`-controls-residual contract, both-paths-reduce-divergence parity, and the full integration smoke. The sign-convention gate caught a real bug in the original plan derivation — Jacobi solves `A·p = -ρ·dx²·div_u/dt` (negative), not `+`; the original plan's `b = +rhs` would have produced a sign-flipped CG solution.
+
+**Honest perf finding** on the dev grid (dx=2mm, single_carrot pot):
+
+| Path | ms/projection | divergence reduction factor |
+| --- | --- | --- |
+| Rust Jacobi (200 iter) | 3.5 | 4.6× |
+| PCG (tol=1e-3, ~150 iter) | 27.6 | **20.6×** |
+| PCG (tol=1e-5, hits 200-iter cap) | 40.0 | 20.6× |
+
+PCG delivers **~4.5× better divergence reduction** than Jacobi at the same iter cap, but is **~8× slower** per projection. The plan agent's "~30 iter / ~1.15 ms" estimate was optimistic — the pot's mostly-Neumann geometry has higher κ than the 9000 estimate (closer to 150,000 at dx=2mm), so even Jacobi-preconditioned CG still needs 150-200 iterations to converge. Each PCG iteration is ~5× more expensive than a Jacobi sweep (SpMV + 2 dots + 2 axpys + preconditioner), so the algorithmic 5× iter reduction is consumed by the per-iter cost.
+
+**Phase 6 status: algorithmically correct, but slower than Jacobi on this geometry.** The flag stays default-OFF; pressure-only Rust Jacobi remains the canonical fast path. PCG becomes net-positive when:
+
+1. The user genuinely needs a converged pressure (e.g. very small dt where Jacobi residual matters at the per-step velocity level), OR
+2. The grid moves to dx=0.5mm production where Jacobi's `1 - π²/(2N²)` convergence rate becomes catastrophic, OR
+3. A future PR adds warm-start (carry `grid.p` across projections — typically halves iter count), OR
+4. A future PR adds incomplete-Cholesky or AMG preconditioning (cuts iter count to ~30).
+
+Test suite: 218/218 pass (213 + 5 Phase 6). The implementation is correct, the validation harness covers the contract precisely, and the flag is safe to leave wired for the next optimisation cycle.
+
 ## Project structure
 
 ```

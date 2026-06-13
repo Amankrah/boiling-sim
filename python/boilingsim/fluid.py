@@ -539,12 +539,74 @@ def _get_rust_sim():
         import sim_core
         if sim_core.cuda is None:
             raise RuntimeError(
-                "BOILINGSIM_USE_RUST_PRESSURE=1 but sim_core.cuda is unavailable "
-                "(no CUDA driver or extension built without CUDA). "
-                "Unset the env var or run scripts/bootstrap.ps1."
+                "BOILINGSIM_USE_RUST_PRESSURE=1 or BOILINGSIM_PRESSURE_SOLVER=cg-rust "
+                "but sim_core.cuda is unavailable (no CUDA driver or extension built "
+                "without CUDA). Unset the env var or run scripts/bootstrap.ps1."
             )
         _RUST_SIM_CORE = sim_core.cuda.SimCore(0)
     return _RUST_SIM_CORE
+
+
+# Phase 6: PCG workspace cache. Keyed by grid shape so a single Python process
+# can run multiple scenarios; the cache rebuilds on shape change. All buffers
+# live on the GPU and stay alive across projections to avoid per-step
+# wp.zeros allocations.
+_PCG_WORKSPACE = {"shape": None, "buffers": None}
+
+
+def _get_pcg_workspace(shape):
+    """Lazily build (or rebuild on shape change) the device-resident PCG
+    workspace buffers. Returns a dict of 8 wp.arrays (5 main + 1 dot
+    workspace + 7 device scalars).
+    """
+    if _PCG_WORKSPACE["shape"] == shape and _PCG_WORKSPACE["buffers"] is not None:
+        return _PCG_WORKSPACE["buffers"]
+    nx, ny, nz = shape
+    bufs = {
+        "b":         wp.zeros(shape, dtype=wp.float32, device="cuda:0"),
+        "r":         wp.zeros(shape, dtype=wp.float32, device="cuda:0"),
+        "z":         wp.zeros(shape, dtype=wp.float32, device="cuda:0"),
+        "p_search":  wp.zeros(shape, dtype=wp.float32, device="cuda:0"),
+        "Ap":        wp.zeros(shape, dtype=wp.float32, device="cuda:0"),
+        "dot_ws":    wp.zeros(1024, dtype=wp.float32, device="cuda:0"),
+        "alpha":     wp.zeros(1,    dtype=wp.float32, device="cuda:0"),
+        "beta":      wp.zeros(1,    dtype=wp.float32, device="cuda:0"),
+        "rzold":     wp.zeros(1,    dtype=wp.float32, device="cuda:0"),
+        "rznew":     wp.zeros(1,    dtype=wp.float32, device="cuda:0"),
+        "bsq":       wp.zeros(1,    dtype=wp.float32, device="cuda:0"),
+        "rsq":       wp.zeros(1,    dtype=wp.float32, device="cuda:0"),
+        "pAp":       wp.zeros(1,    dtype=wp.float32, device="cuda:0"),
+    }
+    _PCG_WORKSPACE["shape"] = shape
+    _PCG_WORKSPACE["buffers"] = bufs
+    return bufs
+
+
+def _select_pressure_solver():
+    """Return the active solver path: "jacobi", "rust-jacobi", or "cg-rust".
+
+    Raises ValueError if `BOILINGSIM_USE_RUST_PRESSURE=1` and
+    `BOILINGSIM_PRESSURE_SOLVER=cg-rust` are both set -- they route through
+    different code paths and the combined intent is ambiguous.
+    """
+    use_rust_jacobi = os.environ.get("BOILINGSIM_USE_RUST_PRESSURE") == "1"
+    solver = os.environ.get("BOILINGSIM_PRESSURE_SOLVER", "jacobi").lower()
+    if solver not in ("jacobi", "cg-rust"):
+        raise ValueError(
+            f"BOILINGSIM_PRESSURE_SOLVER={solver!r} is not recognised; "
+            "valid values are 'jacobi' (default) or 'cg-rust'."
+        )
+    if use_rust_jacobi and solver == "cg-rust":
+        raise ValueError(
+            "BOILINGSIM_USE_RUST_PRESSURE=1 and BOILINGSIM_PRESSURE_SOLVER=cg-rust "
+            "are mutually exclusive -- they route through different code paths. "
+            "Pick exactly one (the CG path is the more recent of the two)."
+        )
+    if solver == "cg-rust":
+        return "cg-rust"
+    if use_rust_jacobi:
+        return "rust-jacobi"
+    return "jacobi"
 
 
 def pressure_projection(
@@ -574,13 +636,12 @@ def pressure_projection(
         device=device,
     )
 
-    # Phase-5 M2: route the inner Jacobi loop through the hand-written CUDA
-    # kernel when BOILINGSIM_USE_RUST_PRESSURE=1. Default OFF so the existing
-    # 187-test suite continues to exercise the Warp reference; the parametrized
-    # parity fixture in test_pressure_parity.py flips this on for the Rust path.
-    # M3 lands CUDA Graph capture; M4 flips the default ON if the perf gate hits.
-    use_rust = os.environ.get("BOILINGSIM_USE_RUST_PRESSURE") == "1"
-    if use_rust:
+    # Three solver paths gated by env vars (see _select_pressure_solver):
+    #   - "jacobi" (default): the Warp ping-pong loop below
+    #   - "rust-jacobi" (Phase 5): fused C++ Jacobi via BOILINGSIM_USE_RUST_PRESSURE=1
+    #   - "cg-rust"     (Phase 6): fused C++ PCG via BOILINGSIM_PRESSURE_SOLVER=cg-rust
+    solver = _select_pressure_solver()
+    if solver == "rust-jacobi":
         rust = _get_rust_sim()
         # CUDA Array Interface protocol -- the public way to ask Warp for the
         # raw device pointer. Validated against arr.ptr in M1 parity tests.
@@ -598,6 +659,32 @@ def pressure_projection(
             cfg.solver.pressure_max_iter,
             MAT_FLUID, MAT_AIR,
         )
+    elif solver == "cg-rust":
+        rust = _get_rust_sim()
+        ws_pcg = _get_pcg_workspace(grid.shape)
+        rust.pressure_solve_pcg(
+            int(grid.p.__cuda_array_interface__["data"][0]),
+            int(ws.div_u.__cuda_array_interface__["data"][0]),
+            int(grid.mat.__cuda_array_interface__["data"][0]),
+            nx, ny, nz,
+            dx, dt, rho,
+            float(cfg.solver.pressure_tol),
+            cfg.solver.pressure_max_iter,
+            int(ws_pcg["b"].__cuda_array_interface__["data"][0]),
+            int(ws_pcg["r"].__cuda_array_interface__["data"][0]),
+            int(ws_pcg["z"].__cuda_array_interface__["data"][0]),
+            int(ws_pcg["p_search"].__cuda_array_interface__["data"][0]),
+            int(ws_pcg["Ap"].__cuda_array_interface__["data"][0]),
+            int(ws_pcg["dot_ws"].__cuda_array_interface__["data"][0]),
+            int(ws_pcg["alpha"].__cuda_array_interface__["data"][0]),
+            int(ws_pcg["beta"].__cuda_array_interface__["data"][0]),
+            int(ws_pcg["rzold"].__cuda_array_interface__["data"][0]),
+            int(ws_pcg["rznew"].__cuda_array_interface__["data"][0]),
+            int(ws_pcg["bsq"].__cuda_array_interface__["data"][0]),
+            int(ws_pcg["rsq"].__cuda_array_interface__["data"][0]),
+            int(ws_pcg["pAp"].__cuda_array_interface__["data"][0]),
+            MAT_FLUID, MAT_AIR,
+        )
     else:
         # Jacobi iterations (ping-pong p ↔ p_tmp).
         # After N iterations, the result lives in p_tmp when N is odd, in grid.p
@@ -611,8 +698,9 @@ def pressure_projection(
                 inputs=[dst, src, ws.div_u, grid.mat, dx, dt, rho, MAT_FLUID, MAT_AIR],
                 device=device,
             )
-    if cfg.solver.pressure_max_iter % 2 == 1:
-        # Odd N → last write was to p_tmp; canonicalize into grid.p.
+    # PCG and rust-jacobi both write the final result directly into grid.p.
+    # The Warp ping-pong only needs canonicalisation when the iter count is odd.
+    if solver == "jacobi" and cfg.solver.pressure_max_iter % 2 == 1:
         wp.copy(grid.p, ws.p_tmp)
 
     # Correct velocities

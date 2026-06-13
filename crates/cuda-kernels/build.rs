@@ -105,7 +105,12 @@ fn main() {
         .file("src/scatter_latent_heat.cu")
         .file("src/scatter_momentum.cu")
         .file("src/reduce_water_alpha.cu")
-        .file("src/update_bubbles.cu");
+        .file("src/update_bubbles.cu")
+        .file("src/laplacian_spmv.cu")
+        .file("src/diag_inverse_apply.cu")
+        .file("src/dot_reduce.cu")
+        .file("src/axpy_device.cu")
+        .file("src/pressure_solve_pcg.cu");
     println!("cargo:rerun-if-env-changed=BOILINGSIM_FMAD");
     if std::env::var("BOILINGSIM_FMAD").as_deref() == Ok("false") {
         println!("cargo:warning=BOILINGSIM_FMAD=false -- compiling with --fmad=false for bit-exact parity");

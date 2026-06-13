@@ -123,6 +123,35 @@ extern "C" {
         mat_fluid: i32,
     ) -> i32;
 
+    /// Phase 6 launcher: full PCG pressure-solve loop in CUDA C++. Inputs
+    /// are `div_u` and `mat`; output is `p_out`. The driver allocates no
+    /// device memory of its own -- the caller passes in pre-allocated
+    /// workspace buffers (5x `n` floats, 1024-float dot workspace, 7
+    /// 1-float device scalars). See pressure_solve_pcg.cu for the layout.
+    fn pressure_solve_pcg_launch(
+        p_out: *mut f32,
+        div_u: *const f32,
+        mat: *const i32,
+        nx: i32, ny: i32, nz: i32,
+        dx: f32, dt: f32, rho: f32,
+        mat_fluid: i32, mat_air: i32,
+        pressure_tol: f32, max_iter: i32,
+        ws_b: *mut f32,
+        ws_r: *mut f32,
+        ws_z: *mut f32,
+        ws_p_search: *mut f32,
+        ws_ap: *mut f32,
+        dot_workspace: *mut f32,
+        dev_alpha: *mut f32,
+        dev_beta: *mut f32,
+        dev_rzold: *mut f32,
+        dev_rznew: *mut f32,
+        dev_bsq: *mut f32,
+        dev_rsq: *mut f32,
+        dev_pap: *mut f32,
+        iter_count_host: *mut i32,
+    ) -> i32;
+
     /// Phase 5.7 launcher: per-bubble update (Mikic-Rohsenow growth or
     /// Plesset-Zwick condensation w/ embedded T scatter, Fritz departure,
     /// terminal-slip advection, vent/solid deactivation). Mirror of
@@ -426,6 +455,74 @@ pub unsafe fn reduce_water_alpha_raw(
         return Err(anyhow!("reduce_water_alpha_launch returned cudaError_t {rc}"));
     }
     Ok(())
+}
+
+/// Phase 6 entry point: PCG pressure solve. Runs the entire iterative
+/// solver inside one Rust→C++ call. Workspace buffers are caller-owned;
+/// the launcher does no allocations.
+///
+/// # Safety
+///
+/// All pointer arguments must point to valid device memory in the primary
+/// context of `device.ordinal()`. Workspace buffers must each carry at
+/// least the documented number of floats (see `pressure_solve_pcg.cu`).
+/// `iter_count_host` must point to a valid host i32 the launcher can
+/// write through.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn pressure_solve_pcg_raw(
+    _device: &Arc<CudaDevice>,
+    p_out_ptr: u64,
+    div_u_ptr: u64,
+    mat_ptr: u64,
+    nx: usize, ny: usize, nz: usize,
+    dx: f32, dt: f32, rho: f32,
+    mat_fluid: i32, mat_air: i32,
+    pressure_tol: f32, max_iter: usize,
+    ws_b_ptr: u64,
+    ws_r_ptr: u64,
+    ws_z_ptr: u64,
+    ws_p_search_ptr: u64,
+    ws_ap_ptr: u64,
+    dot_workspace_ptr: u64,
+    dev_alpha_ptr: u64,
+    dev_beta_ptr: u64,
+    dev_rzold_ptr: u64,
+    dev_rznew_ptr: u64,
+    dev_bsq_ptr: u64,
+    dev_rsq_ptr: u64,
+    dev_pap_ptr: u64,
+) -> Result<usize> {
+    let to_i32 = |v: usize| -> Result<i32> {
+        v.try_into().map_err(|_| anyhow!("dim {v} overflows i32"))
+    };
+    let mut iter_count: i32 = 0;
+    let rc = pressure_solve_pcg_launch(
+        p_out_ptr as *mut f32,
+        div_u_ptr as *const f32,
+        mat_ptr as *const i32,
+        to_i32(nx)?, to_i32(ny)?, to_i32(nz)?,
+        dx, dt, rho,
+        mat_fluid, mat_air,
+        pressure_tol, to_i32(max_iter)?,
+        ws_b_ptr as *mut f32,
+        ws_r_ptr as *mut f32,
+        ws_z_ptr as *mut f32,
+        ws_p_search_ptr as *mut f32,
+        ws_ap_ptr as *mut f32,
+        dot_workspace_ptr as *mut f32,
+        dev_alpha_ptr as *mut f32,
+        dev_beta_ptr as *mut f32,
+        dev_rzold_ptr as *mut f32,
+        dev_rznew_ptr as *mut f32,
+        dev_bsq_ptr as *mut f32,
+        dev_rsq_ptr as *mut f32,
+        dev_pap_ptr as *mut f32,
+        &mut iter_count as *mut i32,
+    );
+    if rc != 0 {
+        return Err(anyhow!("pressure_solve_pcg_launch returned cudaError_t {rc}"));
+    }
+    Ok(iter_count.max(0) as usize)
 }
 
 /// Phase 5.7 entry point. Per-bubble update kernel: growth, condensation,
